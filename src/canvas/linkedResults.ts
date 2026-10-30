@@ -8,6 +8,7 @@ import {
 } from "./model.ts";
 import { absolutePosition } from "./geometry.ts";
 import { indexNodes, isNodeLocked } from "./hierarchy.ts";
+import { sameNodeData } from "./dataBoundary.ts";
 import type { CanvasToolTask } from "./toolCatalog.ts";
 export interface ResultSource {
   documentId: string;
@@ -16,6 +17,25 @@ export interface ResultSource {
   src?: string;
   text?: string;
   referenceInputs?: Record<string, string>;
+  editorData?: Pick<CanvasNodeData, "timeline" | "localStage">;
+}
+
+/** Compositions are backed by an authored document, not necessarily a media URL. */
+export function captureEditorSource(
+  documentId: string,
+  node: CanvasNode,
+): ResultSource {
+  return {
+    documentId,
+    nodeId: node.id,
+    kind: node.type,
+    src: node.data.src,
+    ...(node.type === "timeline"
+      ? { editorData: structuredClone({ timeline: node.data.timeline }) }
+      : node.type === "external"
+        ? { editorData: structuredClone({ localStage: node.data.localStage }) }
+        : {}),
+  };
 }
 export interface LinkedMediaResult {
   kind: "image" | "video" | "audio";
@@ -40,7 +60,7 @@ function sourceError(document: CanvasDocument, source: ResultSource) {
     return "来源节点类型已改变，结果未写入画布。";
 }
 
-/** Post-edit sessions require the same usable media and an editable source until commit. */
+/** Post-edit sessions require the same media or composition and an editable source. */
 export function validateNodeActionSource(
   document: CanvasDocument,
   source: Readonly<ResultSource>,
@@ -50,11 +70,15 @@ export function validateNodeActionSource(
   const error = sourceError(document, source);
   if (error) return { error };
   const node = document.nodes.find((item) => item.id === source.nodeId)!;
-  if (
-    !source.src ||
-    node.data.src !== source.src ||
-    node.data.assetState === "missing"
-  )
+  const composition =
+    source.editorData &&
+    ((node.type === "timeline" && source.editorData.timeline) ||
+      (node.type === "external" &&
+        node.data.external?.externalType === "director-stage"));
+  const unchanged = composition
+    ? sameNodeData(node.data, { ...node.data, ...source.editorData })
+    : !!source.src && node.data.src === source.src;
+  if (!unchanged || node.data.assetState === "missing")
     return { error: "来源素材已改变或不可用，请重新打开工具。" };
   if (isNodeLocked(node, indexNodes(document.nodes)))
     return { error: "来源节点已锁定，请先解锁节点。" };

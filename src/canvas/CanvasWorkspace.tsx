@@ -137,6 +137,7 @@ import {
 } from "./generationHistory";
 import {
   appendLinkedMediaResults,
+  captureEditorSource,
   appendPendingResult,
   fillPendingResult,
   pendingResultNode,
@@ -1776,12 +1777,7 @@ function Workspace() {
       setPreview(node);
       return;
     }
-    editorOrigin.current = {
-      documentId: doc.id,
-      nodeId: node.id,
-      kind: node.type,
-      src: node.data.src,
-    };
+    editorOrigin.current = captureEditorSource(doc.id, node);
     setActionSession(null);
     setEditorMode(mode);
     setEditing(node);
