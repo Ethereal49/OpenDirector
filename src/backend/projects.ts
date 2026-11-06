@@ -148,13 +148,38 @@ export function openBackendProjectCanvas<T>(
   return serializeSessionChange(async () => {
     const previous = active;
     const startedAt = Date.now();
-    const value = await read();
-    if (Date.now() - startedAt >= LEASE_RECONFIRM_MS)
-      // Hydration kept the normal heartbeat from running. Renewing here keeps
-      // the lease alive when it outlived the 60 s grant; if another window has
-      // taken over the expired lease the server rejects this renewal and the
-      // open fails instead of adopting a session we no longer own.
-      await request(`/creation/sessions/${sessionId}`, json("PUT", { projectId: id }));
+    let value: T;
+    try {
+      value = await read();
+      if (Date.now() - startedAt >= LEASE_RECONFIRM_MS)
+        // Hydration kept the normal heartbeat from running. Renewing here keeps
+        // the lease alive when it outlived the 60 s grant; if another window has
+        // taken over the expired lease the server rejects this renewal and the
+        // open fails instead of adopting a session we no longer own.
+        await request(`/creation/sessions/${sessionId}`, json("PUT", { projectId: id }));
+    } catch (failure) {
+      // read() moves this window's session before it finishes the view. A
+      // failure after that acceptance would leave the lease on `id` while
+      // `active` is still `previous`, so the old canvas's next save is
+      // rejected until a heartbeat. Move the session back, as a failed switch
+      // does. A renewal rejected because another window took `id` restores
+      // `previous` without taking `id` back.
+      if (previous && previous !== id) {
+        try {
+          await request(`/creation/projects/${previous}/open`, {
+            method: "POST",
+          });
+        } catch (restoreFailure) {
+          throw new Error(
+            tNow("errors.backend.openFailed", {
+              error: errorMessage(failure),
+              restore: errorMessage(restoreFailure),
+            }),
+          );
+        }
+      }
+      throw failure;
+    }
     // The successful read already holds the lease for `id`.
     active = id;
     if (previous && previous !== id) creationClient(previous).close();

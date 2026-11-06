@@ -909,8 +909,8 @@ def test_first_autosave_after_a_cold_open_reuses_the_warmed_chain(projects, monk
         if not warming:
             break
         assert time.monotonic() < deadline, 'background history validation did not finish'
-        for entry in warming.values():
-            entry[1].wait(0.05)
+        for event in warming.values():
+            event.wait(0.05)
     decoded = []
     original_json = creation_projects.CommitRecord.model_validate_json
     original_model = creation_projects.CommitRecord.model_validate
@@ -933,6 +933,132 @@ def test_plain_snapshot_reads_do_not_warm_history_in_the_background(projects, mo
     monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: scheduled.append(arguments))
     assert cold.snapshot(created.projectId).project.name == 'Renamed'
     assert scheduled == []
+
+
+def test_caught_up_changes_joins_the_open_warm(projects, monkeypatch):
+    """A cold open's warm and the subscriber's caught-up poll share one replay.
+
+    The poll used to replay the chain again while holding the catalog lock.
+    It now waits for the in-flight warm outside that lock and then trusts the
+    validated head.
+    """
+    import threading
+    from filelock import Timeout
+
+    created = create(projects)
+    for revision in range(1, 12):
+        assert projects.execute(rename(created, f'Renamed {revision}', revision)).status == 'applied'
+    cold = restarted(projects)
+    started, release, waited = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+    original = cold._history
+    real_await = cold._await_warm
+
+    def blocking_history(path, manifest):
+        calls.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(5)
+        return original(path, manifest)
+
+    def await_warm(project_id, head, timeout=30):
+        with cold._warm_lock:
+            assert (str(project_id), str(head)) in cold._warming
+        waited.set()
+        return real_await(project_id, head, timeout)
+
+    monkeypatch.setattr(cold, '_history', blocking_history)
+    monkeypatch.setattr(cold, '_await_warm', await_warm)
+    session = str(uuid4())
+    opened = cold.open(created.projectId, session)
+    assert started.wait(5)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        poll = executor.submit(cold.changes, created.projectId, after=opened.eventCursor)
+        assert waited.wait(5)
+        assert not poll.done()
+        assert calls == ['creation-history-warm']
+        # The wait is outside the catalog lock, so another save can still take it.
+        try:
+            cold.local.lock.acquire(timeout=1)
+        except Timeout:
+            raise AssertionError('caught-up changes held the catalog lock while joining the warm')
+        else:
+            cold.local.lock.release()
+        release.set()
+        result = poll.result(timeout=10)
+    assert result['events'] == []
+    assert result['currentCursor'] == opened.eventCursor
+    assert calls == ['creation-history-warm']
+
+
+def test_failed_warm_is_retried_and_a_start_failure_does_not_stick(projects, monkeypatch):
+    import threading
+    created = create(projects)
+    assert projects.execute(rename(created)).status == 'applied'
+    cold = restarted(projects)
+    head = str(cold.head(created.projectId))
+    key = (str(created.projectId), head)
+    original = cold._history
+    calls = []
+
+    def flaky(path, manifest):
+        calls.append(1)
+        if len(calls) == 1:
+            raise ProjectError('transient', 409, code='storage_unavailable')
+        return original(path, manifest)
+
+    monkeypatch.setattr(cold, '_history', flaky)
+    session = str(uuid4())
+    cold.open(created.projectId, session)
+
+    def wait_idle():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with cold._warm_lock:
+                pending = list(cold._warming.values())
+            if not pending:
+                return
+            for event in pending:
+                event.wait(0.05)
+        raise AssertionError('background history validation did not finish')
+
+    wait_idle()
+    assert key not in cold._warmed
+    assert calls == [1]
+    cold.open(created.projectId, session)
+    wait_idle()
+    assert key in cold._warmed
+    assert calls == [1, 1]
+
+    class Boom(threading.Thread):
+        def start(self):
+            raise RuntimeError('cannot start')
+
+    cold._warmed.pop(key, None)
+    monkeypatch.setattr(creation_projects.threading, 'Thread', Boom)
+    path, manifest = cold._read_manifest(created.projectId)
+    with pytest.raises(RuntimeError, match='cannot start'):
+        cold._schedule_warm(path, manifest)
+    assert key not in cold._warming
+    started = time.monotonic()
+    cold._await_warm(created.projectId, head, timeout=30)
+    assert time.monotonic() - started < 1
+
+
+def test_commit_does_not_wait_for_a_warm_of_an_older_head(projects):
+    import threading
+    created = create(projects)
+    assert projects.execute(rename(created)).status == 'applied'
+    cold = restarted(projects)
+    stale = threading.Event()
+    # The create commit is an ancestor. A warm still proving it must not block
+    # a save of the current head.
+    cold._warming[(str(created.projectId), str(created.commandId))] = stale
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            receipt = executor.submit(cold.execute, rename(created, 'Saved', revision=2)).result(timeout=5)
+        assert receipt.status == 'applied'
+    finally:
+        stale.set()
 
 
 def test_caught_up_changes_validates_a_cold_head_chain(projects, monkeypatch):

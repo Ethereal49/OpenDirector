@@ -1336,10 +1336,16 @@ test("opening a project reads one snapshot that already carries reference edges"
     throw new Error(`Unexpected request ${method} ${path}`);
   };
   const client = new CreationClient(snapshot.project.id);
+  let duringInstall: string | undefined;
+  client.listen(() => {
+    duringInstall = client.referenceStates.get(edge.referenceId);
+  });
   try {
     await client.open();
     assert.deepEqual(client.snapshot, snapshot);
     assert.equal(client.referenceStates.get(edge.referenceId), "used");
+    // install() notifies listeners; they must already see the open-canvas edges.
+    assert.equal(duringInstall, "used");
     assert.equal(
       requests.filter((request) => request.path.endsWith("/open-canvas"))
         .length,

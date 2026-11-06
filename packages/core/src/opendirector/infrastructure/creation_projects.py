@@ -192,8 +192,11 @@ class CreationProjects:
         # Reads arrive on several threads; both caches are only touched here.
         self._cache_lock = threading.Lock()
         self._warm_lock = threading.Lock()
-        self._warming = {}       # (path, head) -> Event for an in-flight validation
-        self._warmed = OrderedDict()  # (path, head) -> True once attempted
+        # (project id, head) -> Event. A save waits only for the head it will read.
+        self._warming = {}
+        # (project id, head) -> True after that head's ancestry was proved.
+        # A failed attempt is absent so the next open can try again.
+        self._warmed = OrderedDict()
         with local.transaction():
             self._recover()
 
@@ -375,45 +378,79 @@ class CreationProjects:
 
         The first autosave after a cold open replays the chain; warming it in
         the background right after the open read keeps that save cheap. The
-        work is coalesced per open project and bounded, never holds the catalog
-        lock and never changes a read result: a failed warm just leaves the
-        lazy path.
+        work is coalesced per (project, head) and bounded, never holds the
+        catalog lock and never changes a read result: a failed warm just
+        leaves the lazy path, and is not remembered as a successful proof.
         """
-        key, head = str(manifest.id), str(manifest.head)
+        key = (str(manifest.id), str(manifest.head))
         with self._warm_lock:
-            if key in self._warming or (key, head) in self._warmed or len(self._warming) >= WARM_CONCURRENCY:
+            if key in self._warming or key in self._warmed or len(self._warming) >= WARM_CONCURRENCY:
                 return
             event = threading.Event()
-            self._warming[key] = (head, event)
-        threading.Thread(target=self._warm, args=(path, manifest, key, head, event),
-                         name='creation-history-warm', daemon=True).start()
+            self._warming[key] = event
+        thread = threading.Thread(target=self._warm, args=(path, manifest, key, event),
+                                  name='creation-history-warm', daemon=True)
+        try:
+            thread.start()
+        except BaseException:
+            # A start failure must not leave a key that every later await waits
+            # out. Anyone who already observed this event is released too.
+            with self._warm_lock:
+                if self._warming.get(key) is event:
+                    self._warming.pop(key, None)
+            event.set()
+            raise
 
-    def _await_warm(self, project_id, timeout=30):
-        """Join the coalesced validation instead of replaying the chain twice.
+    def _await_warm(self, project_id, head, timeout=30):
+        """Join validation of this head instead of replaying its chain twice.
 
-        Called before a write takes the catalog lock, so a first autosave that
-        races the background warm waits for that one validation (~the cost of
-        the old cold replay) rather than both parsing every snapshot at once.
+        A warm of a different head is ignored. The wait stays outside the
+        catalog lock, so a first autosave races one validation rather than
+        parsing every snapshot twice at once.
         """
+        if head is None:
+            return
         with self._warm_lock:
-            entry = self._warming.get(str(project_id))
-        if entry is not None:
-            entry[1].wait(timeout)
+            event = self._warming.get((str(project_id), str(head)))
+        if event is not None:
+            event.wait(timeout)
 
-    def _warm(self, path, manifest, key, head, event):
+    def _await_current_warm(self, project_id, timeout=30):
+        """Wait for a warm of the head this caller is about to read.
+
+        When nothing is in flight this returns without taking the catalog
+        lock. A missing project is left for the caller's own transaction.
+        """
+        project = str(project_id)
+        with self._warm_lock:
+            inflight = any(key[0] == project for key in self._warming)
+        if not inflight:
+            return
+        try:
+            head = self.head(project_id)
+        except ProjectError:
+            return
+        self._await_warm(project_id, head, timeout)
+
+    def _warm(self, path, manifest, key, event):
+        validated = False
         try:
             self._history(path, manifest)
+            validated = True
         except BaseException:
             # Reads stay correct: every path that needs the chain replays it
-            # itself and reports the integrity failure there.
+            # itself and reports the integrity failure there. Leaving the key
+            # out of _warmed lets the next open retry a transient failure.
             pass
         finally:
             with self._warm_lock:
-                self._warming.pop(key, None)
-                self._warmed[(key, head)] = True
-                self._warmed.move_to_end((key, head))
-                while len(self._warmed) > WARM_ATTEMPTS:
-                    self._warmed.popitem(last=False)
+                if self._warming.get(key) is event:
+                    self._warming.pop(key, None)
+                if validated:
+                    self._warmed[key] = True
+                    self._warmed.move_to_end(key)
+                    while len(self._warmed) > WARM_ATTEMPTS:
+                        self._warmed.popitem(last=False)
             event.set()
 
     def _current_record(self, db, project_id, path, manifest):
@@ -692,6 +729,10 @@ class CreationProjects:
     def changes(self, project_id, *, after=0, limit=100):
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 200:
             raise ProjectError('变更游标或分页大小无效。')
+        # open() may already be proving this head. Joining that warm before the
+        # catalog lock keeps a caught-up subscriber from replaying the same
+        # chain while the lock is held.
+        self._await_current_warm(project_id)
         with self.local.transaction() as db:
             self._recover()
             path, manifest = self._find(db, project_id)
@@ -730,7 +771,7 @@ class CreationProjects:
 
     def replay(self, command):
         """Resolve an already committed command before reading upload handles."""
-        self._await_warm(command.projectId)
+        self._await_current_warm(command.projectId)
         with self.local.transaction() as db:
             self._recover()
             return self._replay(self._load(db, command.projectId)[2], command)
@@ -767,11 +808,21 @@ class CreationProjects:
         """Remove the project directory without rewriting its history.
 
         Deleting a canvas used to publish a throwaway no-op commit first, which
-        replayed the whole chain (twice in the client flow) and then wrote into
-        the directory it was about to remove. The receipt is still a committed
-        noop, but the removal is validated against the head and the chain is
-        never replayed. A rejected command (stale revision) publishes its
-        receipt because that directory is kept.
+        replayed the whole chain and then wrote into the directory it was about
+        to remove.
+
+        Accepted delete: the receipt is returned to the caller and is not
+        committed. The directory is removed after the catalog lock is released,
+        so a later ``project.trash`` with the same commandId cannot replay that
+        receipt and resolves as 404. The workspace treats that 404 as success
+        because the project it listed is already gone. The CLI reports the 404:
+        a missing project id must not look like a completed delete, and there
+        is no stored receipt to return.
+
+        Rejected delete (stale revision or another validation failure): the
+        directory is kept, so the receipt is published. Publishing replays the
+        chain first. A head-only read is not marked validated, and a corrupt
+        ancestor fails before any journal is written.
 
         The directory is recycled when the platform supports it and removed
         permanently otherwise; `delete_mode` tells the client which one the user
@@ -825,7 +876,7 @@ class CreationProjects:
                session=None, source='ui', files=(), deletes=(), with_history=False):
         if source not in {'ui', 'agent', 'background', 'external'}:
             raise ProjectError('无效的命令来源。')
-        self._await_warm(command.projectId)
+        self._await_current_warm(command.projectId)
         with self.local.transaction() as db:
             self._recover()
             path, manifest, records = self._load(db, command.projectId)

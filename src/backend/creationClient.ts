@@ -150,7 +150,13 @@ export class CreationClient {
         // The open-canvas response carries the one authoritative snapshot plus
         // the reference evidence the canvas draws; a bare snapshot response is
         // still accepted for compatibility and falls back to a canvas read.
+        // Listeners re-project during install and read referenceStates, so the
+        // map is installed first, the same order as refresh().
         canvas = "snapshot" in opened ? opened : undefined;
+        if (canvas)
+          this.referenceStates = new Map(
+            canvas.edges.map((edge) => [edge.referenceId, edge.state]),
+          );
         this.install(canvas ? canvas.snapshot : (opened as ProjectSnapshot));
         break;
       } catch (error) {
@@ -168,11 +174,7 @@ export class CreationClient {
         );
       }
     }
-    if (canvas)
-      this.referenceStates = new Map(
-        canvas.edges.map((edge) => [edge.referenceId, edge.state]),
-      );
-    else await this.refresh();
+    if (!canvas) await this.refresh();
     this.subscribe();
     return this.snapshot;
   }

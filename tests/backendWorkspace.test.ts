@@ -669,9 +669,51 @@ test("a long read that lost its lease fails instead of adopting it", async (t) =
     await assert.rejects(openWorkspaceProject(f.projects.get(id)!));
     // A failed adoption must not point heartbeats at the stolen project.
     assert.equal(activeBackendProjectId(), first.id);
+    // The session moved with the read and the renewal was rejected, so this
+    // window's lease is put back on the project the canvas is still showing.
+    assert.equal(
+      f.calls.filter(
+        (call) =>
+          call.method === "POST" &&
+          call.path === `/api/creation/projects/${first.id}/open`,
+      ).length,
+      1,
+    );
   } finally {
     globalThis.fetch = plain;
     Date.now = realNow;
+    CreationProjection.prototype.open = stub;
+  }
+});
+
+test("a read that fails after the lease moves restores the previous project", async (t) => {
+  const f = fixture(t);
+  const first = await initializeWorkspace();
+  const id = crypto.randomUUID();
+  f.projects.set(id, { id, name: "Broken", path: "/projects/Broken" });
+  f.documents.set(id, { ...createDocument("Broken"), id });
+  const stub = CreationProjection.prototype.open;
+  CreationProjection.prototype.open = async function () {
+    // Stands for client.open() having been accepted and the following view
+    // read failing. The server lease is already on this project.
+    throw new Error("view failed");
+  };
+  try {
+    f.calls.length = 0;
+    await assert.rejects(
+      openWorkspaceProject(f.projects.get(id)!),
+      /view failed/,
+    );
+    assert.equal(activeBackendProjectId(), first.id);
+    assert.equal(
+      f.calls.filter(
+        (call) =>
+          call.method === "POST" &&
+          call.path === `/api/creation/projects/${first.id}/open`,
+      ).length,
+      1,
+    );
+  } finally {
     CreationProjection.prototype.open = stub;
   }
 });
