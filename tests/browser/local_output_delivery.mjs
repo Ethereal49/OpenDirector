@@ -13,7 +13,10 @@ const browser = await chromium.launch({
     : {}),
   args: ["--no-sandbox"],
 });
-const page = await browser.newPage({ viewport: { width: 1700, height: 1100 } });
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1700, height: 1100 } });
+await page.addInitScript(() => {
+  try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
+});
 page.setDefaultTimeout(15000);
 const failures = [];
 try {

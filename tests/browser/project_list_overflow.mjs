@@ -15,7 +15,7 @@ await call(`/api/creation/projects/${id}/commands`, { projectId: id, commandId: 
   type: "project.create", payload: { name: `Project list ${id.slice(0, 8)}` } });
 const browser = await launchBrowser();
 try {
-  const page = await browser.newPage({ viewport: { width: 420, height: 760 } });
+  const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 420, height: 760 } });
   // Skip the first-run model setup welcome; it covers the canvas.
   await page.addInitScript(() =>
     localStorage.setItem("opendirector.modelSetup.v1", "dismissed"),

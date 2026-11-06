@@ -308,7 +308,11 @@ try {
     args: ["--no-sandbox"],
   });
   const page = await browser.newPage({
+    locale: "zh-CN",
     viewport: { width: 1700, height: 1100 },
+  });
+  await page.addInitScript(() => {
+    try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
   });
   page.setDefaultTimeout(20000);
   const errors = [];
@@ -330,25 +334,23 @@ try {
   await saved();
   if (full) {
     await page.getByRole("button", { name: "切换项目", exact: true }).click();
-    await page
-      .getByRole("menuitem", { name: "新建画布项目", exact: true })
-      .click();
-    await page
-      .getByRole("textbox", { name: "项目名称", exact: true })
-      .fill("Full creation " + crypto.randomUUID().slice(0, 8));
     const created = page.waitForResponse(
       (r) =>
         r.url().endsWith("/commands") &&
         r.request().postDataJSON()?.type === "project.create",
     );
-    await page.getByRole("button", { name: "创建项目", exact: true }).click();
+    await page
+      .getByRole("menuitem", { name: "新建画布项目", exact: true })
+      .click();
     const response = await created;
     assert.equal((await response.json()).status, "applied");
     pid = response.request().postDataJSON().projectId;
     url = base + `/ai-tool/ai-canvas/${pid}`;
-    await page
-      .getByRole("dialog", { name: "新建画布项目", exact: true })
-      .waitFor({ state: "hidden" });
+    const projectName = "Full creation " + crypto.randomUUID().slice(0, 8);
+    const nameInput = page.getByRole("textbox", { name: "项目名称", exact: true });
+    await nameInput.fill(projectName);
+    await nameInput.press("Enter");
+    await page.getByRole("button", { name: projectName, exact: true }).waitFor();
     await saved();
     await page
       .getByRole("toolbar", { name: "画布创作工具" })
