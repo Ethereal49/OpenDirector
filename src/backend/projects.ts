@@ -123,6 +123,14 @@ export function openBackendProject(documentId: string, _title: string) {
   });
 }
 
+/** Longest canvas read that can rely on the lease it acquired at the start.
+ *
+ * The server grants a 60 s lease, and heartbeat renewal is suppressed while a
+ * read owns the session-change queue. A media-heavy read can stream for longer
+ * than that (one asset read is bounded at 120 s per attempt), so a read that
+ * outlived this window renews the lease before adoption. */
+const LEASE_RECONFIRM_MS = 30_000;
+
 /** Read a canvas and adopt the session lease that read acquires.
  *
  * `CreationClient.open()` reads through POST /open-canvas, which moves this
@@ -139,7 +147,14 @@ export function openBackendProjectCanvas<T>(
   const id = backendProjectId(documentId);
   return serializeSessionChange(async () => {
     const previous = active;
+    const startedAt = Date.now();
     const value = await read();
+    if (Date.now() - startedAt >= LEASE_RECONFIRM_MS)
+      // Hydration kept the normal heartbeat from running. Renewing here keeps
+      // the lease alive when it outlived the 60 s grant; if another window has
+      // taken over the expired lease the server rejects this renewal and the
+      // open fails instead of adopting a session we no longer own.
+      await request(`/creation/sessions/${sessionId}`, json("PUT", { projectId: id }));
     // The successful read already holds the lease for `id`.
     active = id;
     if (previous && previous !== id) creationClient(previous).close();

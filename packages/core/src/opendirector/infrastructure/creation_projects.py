@@ -308,6 +308,12 @@ class CreationProjects:
                 raise ValueError('Commit changed during read')
             if before[2] <= 8 * 1024 * 1024:
                 with self._cache_lock:
+                    # Another reader (a warm or a caught-up changes() poll) may
+                    # have installed this record while we parsed it; replacing
+                    # it must subtract the replaced size or the budget drifts.
+                    replaced = self._records_cache.pop(file, None)
+                    if replaced is not None:
+                        self._records_cache_bytes -= replaced[0][2]
                     self._records_cache[file] = (before, record, content)
                     self._records_cache_bytes += before[2]
                     while len(self._records_cache) > RECORD_CACHE_ENTRIES or self._records_cache_bytes > RECORD_CACHE_BYTES:
@@ -796,6 +802,11 @@ class CreationProjects:
             except (ValueError, ProjectError) as error:
                 issue = dict(code='invalid_input', message=str(error)[:500])
             if issue is not None:
+                # Publishing a rejected receipt moves the head and marks it
+                # validated, and a journal left by a failed publication would
+                # block later deletions. Prove the ancestry this head-only read
+                # did not inspect before writing anything.
+                self._history(path, manifest)
                 rejected = self._make_record(command, manifest.head, before, [], source, issue)
                 return self._publish(CommitIntent(
                     fromName=path.name, toName=path.name, beforeFingerprint=digest(before), record=rejected),

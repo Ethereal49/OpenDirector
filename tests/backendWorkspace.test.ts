@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { creationClient } from "../src/backend/creationClient.ts";
 import { CreationProjection } from "../src/backend/creationProjection.ts";
-import { releaseBackendProject } from "../src/backend/projects.ts";
+import {
+  activeBackendProjectId,
+  releaseBackendProject,
+} from "../src/backend/projects.ts";
 import { invalidateCached } from "../src/backend/requestCache.ts";
 import {
   cleanupUnreadableWorkspaceProjects,
@@ -97,7 +100,10 @@ function fixture(t: TestContext) {
       return Response.json({ removed: ["Legacy"], failed: [] });
     }
     if (path.includes("/sessions/")) {
-      lease = null;
+      // A heartbeat renewal keeps the lease on its project; an explicit close
+      // releases it.
+      if (method === "PUT") lease = body?.projectId ?? null;
+      else lease = null;
       return Response.json({ ok: true });
     }
     const id = path.split("/")[4]!;
@@ -594,4 +600,78 @@ test("a stale in-memory revision is reread and the trash retried once", async (t
   assert.equal(trashes, 2);
   assert.deepEqual(versions, [3, 1]);
   assert.equal(f.projects.size, 0);
+});
+
+test("a canvas read that outlives the lease renews it before adopting", async (t) => {
+  const f = fixture(t);
+  await initializeWorkspace();
+  const id = crypto.randomUUID();
+  f.projects.set(id, { id, name: "Slow", path: "/projects/Slow" });
+  f.documents.set(id, { ...createDocument("Slow"), id });
+  const stub = CreationProjection.prototype.open;
+  const realNow = Date.now;
+  let now = 1_000_000;
+  Date.now = () => now;
+  CreationProjection.prototype.open = async function (this: CreationProjection) {
+    // Media hydration streams longer than the server's 60 s lease.
+    now += 61_000;
+    return stub.call(this);
+  };
+  try {
+    f.calls.length = 0;
+    const opened = await openWorkspaceProject(f.projects.get(id)!);
+    assert.equal(opened.id, id);
+    const renewals = f.calls.filter(
+      (call) => call.method === "PUT" && call.path.includes("/sessions/"),
+    );
+    assert.equal(renewals.length, 1);
+    assert.equal(renewals[0]!.body.projectId, id);
+    assert.equal(
+      f.calls.some((call) => call.method === "DELETE"),
+      false,
+    );
+    // The renewed lease is the adopted one, so saving right after works.
+    await saveWorkspaceDocument({ ...opened, title: "Slow saved" });
+    assert.equal(f.documents.get(id)?.title, "Slow saved");
+  } finally {
+    Date.now = realNow;
+    CreationProjection.prototype.open = stub;
+  }
+});
+
+test("a long read that lost its lease fails instead of adopting it", async (t) => {
+  const f = fixture(t);
+  const first = await initializeWorkspace();
+  const id = crypto.randomUUID();
+  f.projects.set(id, { id, name: "Stolen", path: "/projects/Stolen" });
+  f.documents.set(id, { ...createDocument("Stolen"), id });
+  const stub = CreationProjection.prototype.open;
+  const realNow = Date.now;
+  let now = 2_000_000;
+  Date.now = () => now;
+  CreationProjection.prototype.open = async function (this: CreationProjection) {
+    now += 61_000;
+    return stub.call(this);
+  };
+  const plain = globalThis.fetch;
+  globalThis.fetch = async (url, options = {}) => {
+    if (
+      String(url).includes("/sessions/") &&
+      (options.method ?? "GET") === "PUT"
+    )
+      return Response.json(
+        { detail: "工程正在其他窗口中打开", code: "storage_busy" },
+        { status: 409 },
+      );
+    return plain(url, options);
+  };
+  try {
+    await assert.rejects(openWorkspaceProject(f.projects.get(id)!));
+    // A failed adoption must not point heartbeats at the stolen project.
+    assert.equal(activeBackendProjectId(), first.id);
+  } finally {
+    globalThis.fetch = plain;
+    Date.now = realNow;
+    CreationProjection.prototype.open = stub;
+  }
 });

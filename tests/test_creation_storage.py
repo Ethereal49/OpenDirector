@@ -845,17 +845,50 @@ def test_trash_removes_without_replaying_history_or_writing_a_commit(projects, m
     assert create(cold, 'Renamed 11').projectId != created.projectId  # name reusable
 
 
-def test_rejected_trash_is_a_durable_receipt_without_replaying_history(projects, monkeypatch):
+def test_rejected_trash_is_a_durable_receipt_after_validating_ancestry(projects, monkeypatch):
     created = create(projects)
     projects.execute(rename(created))
     cold = restarted(projects)
     monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
-    monkeypatch.setattr(cold, '_history', lambda *arguments: pytest.fail('history replayed for a delete'))
+    histories = []
+    original = cold._history
+
+    def history(path, manifest):
+        histories.append(1)
+        return original(path, manifest)
+
+    monkeypatch.setattr(cold, '_history', history)
     stale = trash(created, revision=1)
     receipt = cold.execute(stale)
     assert receipt.status == 'rejected' and receipt.issues[0].code == 'revision_conflict'
+    # A rejected trash still moves the head, so the ancestry behind the
+    # head-only read must be proven before the receipt is published.
+    assert len(histories) == 1
     assert cold.snapshot(created.projectId).project.name == 'Renamed'
-    assert cold.execute(stale) == receipt  # Existing commit is the replay; still no chain read.
+    assert cold.execute(stale) == receipt  # Existing commit is the replay; no chain read.
+    assert len(histories) == 1
+
+
+def test_rejected_trash_on_a_corrupt_chain_publishes_nothing_and_still_allows_delete(
+        projects, monkeypatch, unrecycled):
+    created = create(projects)
+    projects.execute(rename(created))
+    ancestor = projects.root / 'Renamed' / 'commits' / f'{created.commandId}.json'
+    ancestor.write_bytes(ancestor.read_bytes().replace(b'Example', b'Corrupt', 1))
+    cold = restarted(projects)
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
+    with pytest.raises(ProjectError) as blocked:
+        cold.execute(trash(created, revision=1))  # Stale revision would publish a receipt.
+    assert blocked.value.code == 'storage_unavailable'
+    # Validation happens before the journal is written, so recovery is not
+    # blocked and nothing was published on top of the corrupt chain.
+    assert list(cold.intents.glob('*.json')) == []
+    assert cold.snapshot(created.projectId).project.name == 'Renamed'
+    with pytest.raises(ProjectError):
+        cold.records(created.projectId)
+    receipt = cold.execute(trash(created, revision=2))
+    assert receipt.status == 'noop'
+    assert not (projects.root / 'Renamed').exists()
 
 
 def test_first_autosave_after_a_cold_open_reuses_the_warmed_chain(projects, monkeypatch):
@@ -967,3 +1000,31 @@ def test_corrupt_ancestor_blocks_writes_but_the_broken_canvas_can_still_be_delet
     assert receipt.status == 'noop'
     assert not (projects.root / 'Renamed').exists()
     assert cold.list_projects()['projects'] == []
+
+
+def test_concurrent_cold_record_parses_keep_cache_byte_accounting(projects, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from opendirector.infrastructure import creation_projects as module
+
+    created = create(projects)
+    projects.execute(rename(created))
+    cold = restarted(projects)
+    path, manifest = cold._read_manifest(created.projectId)
+    barrier = threading.Barrier(2)
+    original = module.CommitRecord.model_validate_json
+
+    def decode(raw, **kwargs):
+        # Force both readers to parse the same record before either caches it.
+        barrier.wait(timeout=5)
+        return original(raw, **kwargs)
+
+    monkeypatch.setattr(module.CommitRecord, 'model_validate_json', decode)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = [executor.submit(cold._record, path, manifest.head) for _ in range(2)]
+        for result in results:
+            assert result.result(timeout=10).command.commandId == manifest.head
+    # The second reader replaces the same entry; the budget must count it once.
+    assert len(cold._records_cache) == 1
+    assert cold._records_cache_bytes == sum(
+        entry[0][2] for entry in cold._records_cache.values())
