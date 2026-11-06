@@ -209,8 +209,8 @@ try {
     }),
   );
 } catch (error) {
-  console.log(await page.locator(".cw-settings-dialog").innerText());
-  await page.screenshot({ path: "/tmp/provider-settings-failure.png" });
+  console.error("Browser state:", await page.locator("body").innerText().catch(() => "unavailable"));
+  await page.screenshot({ path: "/tmp/provider-settings-failure.png" }).catch(() => {});
   throw error;
 } finally {
   await browser.close();
