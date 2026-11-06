@@ -84,6 +84,10 @@ async def test_hidden_source_generation_frozen_history_restart_and_idempotent_co
     assert send(store, pid, 'reference.add', session=session,
         versions=[ver('canvas_item', target), ver('generation_spec', spec)],
         reference=dict(id=ref_id, projectId=pid, binding='follow_current', source=dict(id=source.id), targetSpecId=spec.id)).status == 'applied'
+    spec = store.snapshot(pid).generationSpecs[-1]
+    assert send(store, pid, 'generationSpec.setPrompt', session=session, versions=[ver('generation_spec', spec)],
+        specId=spec.id, prompt='Use ', promptContent=[dict(type='text', text='Use '),
+            dict(type='reference', referenceId=ref_id)]).status == 'applied'
     snapshot = store.snapshot(pid)
     target, spec = snapshot.canvasItems[-1], snapshot.generationSpecs[-1]
     command = parse_command(dict(commandId=uuid4(), projectId=pid, type='generation.submit',
@@ -102,6 +106,7 @@ async def test_hidden_source_generation_frozen_history_restart_and_idempotent_co
     assert not snapshot.jobs[0].adopted  # Hiding the source changed the current inputs.
     assert len(snapshot.results) == 1
     assert snapshot.jobs[0].inputSnapshot.references[0].asset.assetId == asset.id
+    assert snapshot.generationSpecs[-1] == spec
     assert not any(i.visible for i in snapshot.canvasItems)
     assert (await runner.execute(command, session=session)) == receipt
     assert len(provider.calls) == 1
