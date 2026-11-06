@@ -55,6 +55,7 @@ const browser = await chromium.launch({
 let page;
 try {
   page = await browser.newPage({
+    locale: "zh-CN",
     viewport: { width: 1500, height: 1000 },
   });
   // Skip the first-run model setup welcome; it covers the canvas.

@@ -17,7 +17,10 @@ async function call(path, body) {
 }
 assert.equal((await call("/api/creation-test-health")).isolated, true);
 const browser = await launchBrowser();
-const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } });
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1500, height: 1000 } });
+await page.addInitScript(() => {
+  try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
+});
 page.setDefaultTimeout(15000);
 const calls = [];
 page.on("request", (request) => calls.push(request.url()));
@@ -32,6 +35,8 @@ try {
   await page.goto(`${base}/ai-tool/ai-canvas/${projectId}?creation=unified`);
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("button", { name: "模型接入", exact: true }).click();
+  await page.locator('.cw-model-setup-row').filter({ hasText: '图片模型' })
+    .getByRole('button', { name: /管理|配置/ }).click();
   for (const [category, interfaces] of [
     ["图片", ["vLLM-Omni 图片接口", "vLLM-Omni 分割接口"]],
     ["音频", ["vLLM-Omni 语音合成接口", "vLLM-Omni 音乐生成接口", "vLLM-Omni 扒谱接口"]],
@@ -119,6 +124,9 @@ try {
   const card = page
     .locator(".cw-model-option")
     .filter({ hasText: "image-card" });
+  const textCard = page.locator(".cw-model-option").filter({ hasText: "text-card" });
+  await textCard.locator("summary").click();
+  await textCard.getByRole("checkbox", { name: "图片理解", exact: true }).uncheck();
   await card.locator("summary").click();
   await card.getByRole("checkbox", { name: "图片理解", exact: true }).check();
   await page.screenshot({ path: "/tmp/provider-settings-agent.png" });
@@ -172,7 +180,7 @@ try {
   await page.getByRole("button", { name: "模型配置：媒体模型", exact: true }).click();
   const picker = page.getByRole("dialog", { name: "模型配置", exact: true });
   await picker.getByRole("tab", { name: /视频/ }).click();
-  const modelLogo = picker.getByRole("option", { name: "MiniMax-H3", exact: true }).locator("img.cw-model-logo");
+  const modelLogo = picker.getByRole("option", { name: /^MiniMax-H3(?: · |$)/ }).first().locator("img.cw-model-logo");
   await modelLogo.waitFor();
   await modelLogo.evaluate((image) => image.decode());
   assert.ok(await modelLogo.evaluate((image) => image.naturalWidth > 0));
@@ -201,8 +209,8 @@ try {
     }),
   );
 } catch (error) {
-  console.log(await page.locator(".cw-settings-dialog").innerText());
-  await page.screenshot({ path: "/tmp/provider-settings-failure.png" });
+  console.error("Browser state:", await page.locator("body").innerText().catch(() => "unavailable"));
+  await page.screenshot({ path: "/tmp/provider-settings-failure.png" }).catch(() => {});
   throw error;
 } finally {
   await browser.close();
