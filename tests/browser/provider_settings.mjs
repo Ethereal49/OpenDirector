@@ -180,7 +180,7 @@ try {
   await page.getByRole("button", { name: "模型配置：媒体模型", exact: true }).click();
   const picker = page.getByRole("dialog", { name: "模型配置", exact: true });
   await picker.getByRole("tab", { name: /视频/ }).click();
-  const modelLogo = picker.getByRole("option", { name: "MiniMax-H3", exact: true }).locator("img.cw-model-logo");
+  const modelLogo = picker.getByRole("option", { name: /^MiniMax-H3(?: · |$)/ }).first().locator("img.cw-model-logo");
   await modelLogo.waitFor();
   await modelLogo.evaluate((image) => image.decode());
   assert.ok(await modelLogo.evaluate((image) => image.naturalWidth > 0));
