@@ -93,7 +93,7 @@ opendirector serve
 
 ## 社区交流
 
-欢迎加入 **OpenDirector with vLLM-Omni (2)** 微信群，交流 OpenDirector 的使用经验、分享创作。使用微信扫描下方二维码入群，点击图片可查看完整分辨率。
+欢迎加入 **OpenDirector** 交流群，交流 OpenDirector 的使用经验、分享创作。使用微信扫描下方二维码入群，点击图片可查看完整分辨率。
 
 <p align="center">
   <a href="docs/guides/assets/opendirector-wechat-group-2.png">
