@@ -231,7 +231,8 @@ try {
       (value) => value.jobs[0].status === "succeeded",
       "background completion",
     );
-    assert.equal(snapshot.jobs[0].adopted, true);
+    assert.equal(snapshot.jobs[0].adopted, false);
+    assert.equal(snapshot.generationSpecs.find((spec) => spec.id === targetSpecId).currentResultId, null);
     assert.equal(
       snapshot.jobs[0].inputSnapshot.references[0].asset.assetId,
       sourceAsset.id,
@@ -246,10 +247,6 @@ try {
     );
     assert.equal(snapshot.canvasItems.length, 2);
     assert.equal(snapshot.generationSpecs.length, 2);
-    await page
-      .getByText(/Fixture generated:/)
-      .first()
-      .waitFor();
     await page.getByRole("button", { name: "资产列表", exact: true }).click();
     const list = page.getByRole("dialog", { name: "资产列表", exact: true });
     await list.waitFor();
@@ -270,6 +267,14 @@ try {
     snapshot = await state();
     assert.equal(snapshot.canvasItems.length, 2);
     assert.equal(snapshot.assets.length, 2);
+    await page.evaluate(async ({ projectId, targetSpecId, resultId }) => {
+      const { creationClient, objectVersion } = await import("/src/backend/creationClient.ts");
+      const client = creationClient(projectId);
+      const spec = client.snapshot.generationSpecs.find((item) => item.id === targetSpecId);
+      await client.command("result.select", { specId: targetSpecId, resultId }, [objectVersion("generation_spec", spec)]);
+    }, { projectId, targetSpecId, resultId: snapshot.results[0].id });
+    await until((value) => value.generationSpecs.find((spec) => spec.id === targetSpecId).currentResultId === snapshot.results[0].id, "candidate adopted");
+    await page.getByText(/Fixture generated:/).first().waitFor();
     await page.evaluate(async (projectId) => {
       const { creationClient } = await import("/src/backend/creationClient.ts");
       await creationClient(projectId).writeText(
