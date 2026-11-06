@@ -123,6 +123,31 @@ export function openBackendProject(documentId: string, _title: string) {
   });
 }
 
+/** Read a canvas and adopt the session lease that read acquires.
+ *
+ * `CreationClient.open()` reads through POST /open-canvas, which moves this
+ * window's single session lease to the project. Releasing the session and
+ * opening it again would transfer and validate the same snapshot a second time
+ * for no lease benefit. The read runs inside the session-change queue so a
+ * pending heartbeat renewal cannot move the lease back while a large canvas is
+ * still loading. Callers that have not read a snapshot must keep using
+ * openBackendProject. */
+export function openBackendProjectCanvas<T>(
+  documentId: string,
+  read: () => Promise<T>,
+) {
+  const id = backendProjectId(documentId);
+  return serializeSessionChange(async () => {
+    const previous = active;
+    const value = await read();
+    // The successful read already holds the lease for `id`.
+    active = id;
+    if (previous && previous !== id) creationClient(previous).close();
+    keepAlive();
+    return value;
+  });
+}
+
 /** Pause lease renewal while the current project directory is renamed. */
 export function releaseBackendProject() {
   return serializeSessionChange(async () => {

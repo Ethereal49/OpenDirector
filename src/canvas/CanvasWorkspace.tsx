@@ -241,7 +241,7 @@ import {
 } from "./clipboardMedia.ts";
 import { CanvasPointerGesture } from "./pointerGesture";
 import { resourceNodeData } from "./projectAssets";
-import { persistCurrentDocument } from "./projectManagement";
+import { deleteOpenProject, persistCurrentDocument } from "./projectManagement";
 import { ProjectSelector } from "./ProjectSelector";
 import { referencePresentation } from "./referenceEvidence";
 import "./settings.css";
@@ -1523,54 +1523,60 @@ function Workspace() {
     switchPending.current = true;
     setSwitching(true);
     importAbort.current?.abort();
-    let next: WorkspaceProject | undefined;
-    let taken: Set<string> = new Set();
+    const openNext = async (
+      next: WorkspaceProject | undefined,
+      taken: Set<string>,
+    ) => {
+      if (next) installDocument(await openWorkspaceProject(next), true);
+      else {
+        let freshName = t("canvas.workspace.error.projectUntitled");
+        for (let suffix = 2; ; suffix++) {
+          if (!taken.has(freshName.toLocaleLowerCase())) break;
+          freshName = t("canvas.workspace.error.projectUntitledSuffix", {
+            suffix,
+          });
+        }
+        installDocument(
+          await openWorkspaceProject(
+            await createWorkspaceProject(freshName, crypto.randomUUID()),
+          ),
+          true,
+        );
+      }
+    };
     try {
-      if (
-        !(await persistCurrentDocument(
-          () => historyRef.current.present,
-          persist,
-        ))
-      )
-        throw new Error(t("canvas.workspace.error.deleteUnsaved"));
-      const { projects } = await listWorkspaceProjects();
-      next = projects.find((item) => item.id !== project.id);
-      taken = new Set(projects.map((item) => item.name.toLocaleLowerCase()));
-      await trashWorkspaceProject(project);
+      await deleteOpenProject(project, {
+        // The open canvas already holds the authoritative revision; deleting it
+        // must not transfer the same snapshot again.
+        snapshot: creationClient(project.id).snapshot,
+        flush: async () => {
+          if (
+            !(await persistCurrentDocument(
+              () => historyRef.current.present,
+              persist,
+            ))
+          )
+            throw new Error(t("canvas.workspace.error.deleteUnsaved"));
+        },
+        list: listWorkspaceProjects,
+        trash: trashWorkspaceProject,
+        openNext,
+        fail: (error) =>
+          notify(
+            t("canvas.workspace.error.deletedNextOpenFailed", {
+              error: errorMessage(error),
+            }),
+          ),
+        settle: () => {
+          switchPending.current = false;
+          setSwitching(false);
+        },
+      });
     } catch (error) {
       switchPending.current = false;
       setSwitching(false);
       throw error;
     }
-    void (async () => {
-      try {
-        if (next) installDocument(await openWorkspaceProject(next), true);
-        else {
-          let freshName = t("canvas.workspace.error.projectUntitled");
-          for (let suffix = 2; ; suffix++) {
-            if (!taken.has(freshName.toLocaleLowerCase())) break;
-            freshName = t("canvas.workspace.error.projectUntitledSuffix", {
-              suffix,
-            });
-          }
-          installDocument(
-            await openWorkspaceProject(
-              await createWorkspaceProject(freshName, crypto.randomUUID()),
-            ),
-            true,
-          );
-        }
-      } catch (error) {
-        notify(
-          t("canvas.workspace.error.deletedNextOpenFailed", {
-            error: errorMessage(error),
-          }),
-        );
-      } finally {
-        switchPending.current = false;
-        setSwitching(false);
-      }
-    })();
   };
 
   useEffect(() => {

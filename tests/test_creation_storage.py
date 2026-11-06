@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
+import time
 from legacy_fixtures import legacy_project
 from uuid import uuid4
 
@@ -744,3 +745,225 @@ def test_rejected_commit_reports_reason_and_preserves_snapshot(projects, failure
                                  else 'Selected model is unavailable')
     assert projects.snapshot(created.projectId) == before
     assert projects.commit(command, reject, source='background') == receipt
+
+
+def test_list_projects_scans_directories_and_manifests_once(projects, monkeypatch):
+    for index in range(8):
+        create(projects, f'Project {index}')
+    scans, manifests = [], []
+    original_scan = creation_projects.CreationProjects._scan
+    original_read = creation_projects.read_json
+
+    def scanning(self):
+        scans.append(1)
+        return original_scan(self)
+
+    def reading(path):
+        if path.name == 'project.json':
+            manifests.append(path)
+        return original_read(path)
+
+    monkeypatch.setattr(creation_projects.CreationProjects, '_scan', scanning)
+    monkeypatch.setattr(creation_projects, 'read_json', reading)
+    first = projects.list_projects()
+    assert len(first['projects']) == 8
+    # One directory scan and one manifest read per project, never per project pair.
+    assert len(scans) == 1 and len(manifests) == 8
+    scans.clear(), manifests.clear()
+    second = projects.list_projects()
+    assert len(second['projects']) == 8
+    assert len(scans) == 1 and len(manifests) == 8
+
+
+def test_list_projects_still_checks_the_manifest_name_against_the_head(projects):
+    created = create(projects)
+    manifest = read_json(projects.root / 'Example' / 'project.json')
+    manifest['name'] = 'Different'
+    (projects.root / 'Example' / 'project.json').write_text(json.dumps(manifest))
+    listing = projects.list_projects()
+    assert listing['projects'] == []
+    assert [item['name'] for item in listing['unreadable']] == ['Example']
+    assert listing['unreadable'][0]['id'] == str(created.projectId)
+    assert listing['warnings']
+
+
+def test_cold_snapshot_parses_only_the_head_then_history_validates_the_chain(projects, monkeypatch):
+    created = create(projects)
+    for revision in range(1, 30):
+        assert projects.execute(rename(created, f'Renamed {revision}', revision)).status == 'applied'
+    cold = restarted(projects)
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
+    decoded = []
+    original_json = creation_projects.CommitRecord.model_validate_json
+    original_model = creation_projects.CommitRecord.model_validate
+
+    def decode_json(raw, **kwargs):
+        decoded.append(1)
+        return original_json(raw, **kwargs)
+
+    def decode(value, **kwargs):
+        decoded.append(1)
+        return original_model(value, **kwargs)
+
+    monkeypatch.setattr(creation_projects.CommitRecord, 'model_validate_json', decode_json)
+    monkeypatch.setattr(creation_projects.CommitRecord, 'model_validate', decode)
+    assert cold.snapshot(created.projectId).project.name == 'Renamed 29'
+    assert len(decoded) == 1  # Opening reads the head record only.
+    decoded.clear()
+    assert len(cold.records(created.projectId)) == 30
+    assert len(decoded) == 29  # History still replays every ancestor once.
+
+
+def test_trash_removes_without_replaying_history_or_writing_a_commit(projects, monkeypatch):
+    created = create(projects)
+    for revision in range(1, 12):
+        assert projects.execute(rename(created, f'Renamed {revision}', revision)).status == 'applied'
+    directory = projects.root / 'Renamed 11'
+    cold = restarted(projects)
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
+    monkeypatch.setattr(cold, '_history', lambda *arguments: pytest.fail('history replayed for a delete'))
+    seen = {}
+
+    def remove(path, *, recoverable):
+        seen['commits'] = sorted(item.name for item in (path / 'commits').glob('*.json'))
+        shutil.rmtree(path)
+
+    monkeypatch.setattr(creation_projects.recycle, 'remove', remove)
+    removal = trash(created, revision=12)
+    receipt = cold.execute(removal)
+    assert receipt.status == 'noop' and receipt.commandId == removal.commandId
+    # Twelve commits existed before the delete; no throwaway commit was added.
+    assert len(seen['commits']) == 12 and f'{removal.commandId}.json' not in seen['commits']
+    assert not directory.exists()
+    assert cold.list_projects()['projects'] == []
+    with pytest.raises(ProjectError) as missing:
+        cold.snapshot(created.projectId)
+    assert missing.value.status == 404
+    with pytest.raises(ProjectError) as repeated:
+        cold.execute(removal)
+    assert repeated.value.status == 404
+    assert create(cold, 'Renamed 11').projectId != created.projectId  # name reusable
+
+
+def test_rejected_trash_is_a_durable_receipt_without_replaying_history(projects, monkeypatch):
+    created = create(projects)
+    projects.execute(rename(created))
+    cold = restarted(projects)
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
+    monkeypatch.setattr(cold, '_history', lambda *arguments: pytest.fail('history replayed for a delete'))
+    stale = trash(created, revision=1)
+    receipt = cold.execute(stale)
+    assert receipt.status == 'rejected' and receipt.issues[0].code == 'revision_conflict'
+    assert cold.snapshot(created.projectId).project.name == 'Renamed'
+    assert cold.execute(stale) == receipt  # Existing commit is the replay; still no chain read.
+
+
+def test_first_autosave_after_a_cold_open_reuses_the_warmed_chain(projects, monkeypatch):
+    created = create(projects)
+    for revision in range(1, 20):
+        assert projects.execute(rename(created, f'Renamed {revision}', revision)).status == 'applied'
+    cold = restarted(projects)
+    # Opening the canvas serves the head and starts exactly one background validation.
+    session = str(uuid4())
+    assert cold.open(created.projectId, session).project.name == 'Renamed 19'
+    cold.local.release(session)
+    with cold._warm_lock:
+        assert len(cold._warming) <= 1
+    deadline = time.monotonic() + 10
+    while True:
+        with cold._warm_lock:
+            warming = dict(cold._warming)
+        if not warming:
+            break
+        assert time.monotonic() < deadline, 'background history validation did not finish'
+        for entry in warming.values():
+            entry[1].wait(0.05)
+    decoded = []
+    original_json = creation_projects.CommitRecord.model_validate_json
+    original_model = creation_projects.CommitRecord.model_validate
+    monkeypatch.setattr(creation_projects.CommitRecord, 'model_validate_json',
+                        lambda raw, **kwargs: (decoded.append(1), original_json(raw, **kwargs))[1])
+    monkeypatch.setattr(creation_projects.CommitRecord, 'model_validate',
+                        lambda value, **kwargs: (decoded.append(1), original_model(value, **kwargs))[1])
+    receipt = cold.execute(rename(created, 'Saved', revision=20))
+    assert receipt.status == 'applied'
+    assert decoded == []  # The warmed ancestors are trusted; only a new record is built.
+
+
+def test_plain_snapshot_reads_do_not_warm_history_in_the_background(projects, monkeypatch):
+    # Job scans call snapshot() for every project; that must not validate every
+    # chain in the background the way opening a canvas does.
+    created = create(projects)
+    projects.execute(rename(created))
+    cold = restarted(projects)
+    scheduled = []
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: scheduled.append(arguments))
+    assert cold.snapshot(created.projectId).project.name == 'Renamed'
+    assert scheduled == []
+
+
+def test_caught_up_changes_validates_a_cold_head_chain(projects, monkeypatch):
+    created = create(projects)
+    projects.execute(rename(created))
+    cold = restarted(projects)
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
+    opened = cold.snapshot(created.projectId)  # Head-only fast path.
+    ancestor = projects.root / 'Renamed' / 'commits' / f'{created.commandId}.json'
+    ancestor.write_bytes(ancestor.read_bytes().replace(b'Example', b'Corrupt', 1))
+    with pytest.raises(ProjectError, match='缺失或损坏'):
+        cold.changes(created.projectId, after=opened.eventCursor)
+
+
+def test_autosave_racing_the_warm_joins_it_instead_of_replaying_in_parallel(projects, monkeypatch):
+    import threading
+    created = create(projects)
+    for revision in range(1, 25):
+        assert projects.execute(rename(created, f'Renamed {revision}', revision)).status == 'applied'
+    cold = restarted(projects)
+    started, release = threading.Event(), threading.Event()
+    replay_after_release = []
+    original_history = cold._history
+
+    def blocking_history(path, manifest):
+        replay_after_release.append(release.is_set())
+        started.set()
+        assert release.wait(5)
+        return original_history(path, manifest)
+
+    monkeypatch.setattr(cold, '_history', blocking_history)
+    session = str(uuid4())
+    cold.open(created.projectId, session)
+    assert started.wait(5)  # The background validation is in flight and blocked.
+    item = dict(id=str(uuid4()), projectId=str(created.projectId), kind='text',
+                title='node', position=dict(x=0, y=0), binding=dict(role='empty'))
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        save = executor.submit(cold.execute, request(created.projectId, 'canvas.show', item=item), session=session)
+        assert not save.done()  # It waits for the warm instead of replaying the chain itself.
+        release.set()
+        assert save.result(timeout=10).status == 'applied'
+    # First replay is the warm; the save only replays after it was released and
+    # therefore hits the warmed record cache.
+    assert replay_after_release == [False, True]
+
+
+def test_corrupt_ancestor_blocks_writes_but_the_broken_canvas_can_still_be_deleted(projects, monkeypatch, unrecycled):
+    # A head-only open serves the canvas, but no write may proceed on a chain
+    # that cannot be replayed. Deleting is a lifecycle operation on the broken
+    # directory, not a commit on top of it, so it must still be possible.
+    created = create(projects)
+    projects.execute(rename(created))
+    ancestor = projects.root / 'Renamed' / 'commits' / f'{created.commandId}.json'
+    ancestor.write_bytes(ancestor.read_bytes().replace(b'Example', b'Corrupt', 1))
+    cold = restarted(projects)
+    monkeypatch.setattr(cold, '_schedule_warm', lambda *arguments: None)
+    assert cold.snapshot(created.projectId).project.name == 'Renamed'
+    with pytest.raises(ProjectError) as damaged:
+        cold.records(created.projectId)
+    assert damaged.value.code == 'storage_unavailable'
+    with pytest.raises(ProjectError) as blocked:
+        cold.execute(rename(created, 'Saved', revision=2))
+    assert blocked.value.code == 'storage_unavailable'
+    receipt = cold.execute(trash(created, revision=2))
+    assert receipt.status == 'noop'
+    assert not (projects.root / 'Renamed').exists()
+    assert cold.list_projects()['projects'] == []

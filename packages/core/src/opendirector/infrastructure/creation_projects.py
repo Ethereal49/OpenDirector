@@ -130,14 +130,19 @@ def object_changes(before, after, command):
     return changed
 
 
-# Every read validates the whole commit chain, and each record holds a full
-# project snapshot. The cache must fit a long project's history: below that,
-# each read reparses every record from disk and holds the catalog lock long
-# enough to expire sessions and interrupt running jobs.
+# Every history read validates the whole commit chain, and each record holds a
+# full project snapshot. The cache must fit a long project's history: below
+# that, each read reparses every record from disk and holds the catalog lock
+# long enough to expire sessions and interrupt running jobs.
 RECORD_CACHE_ENTRIES = 4096
 RECORD_CACHE_BYTES = 512 * 1024 * 1024
 # Only the validated head of each open project is kept, so this stays small.
 CURRENT_CACHE_ENTRIES = 16
+# A head served without replaying its ancestry is validated in the background
+# so the first autosave after a cold open reuses the parsed chain. At most a
+# couple of warms run at once; more projects simply keep the lazy path.
+WARM_CONCURRENCY = 2
+WARM_ATTEMPTS = 64
 
 
 def _file_signature(file):
@@ -181,9 +186,14 @@ class CreationProjects:
         # Windows ctime is creation time. Verify bytes there before reusing a
         # parsed record, including when an external writer restores its mtime.
         self._verify_record_bytes = os.name == 'nt'
-        self._current_cache: "OrderedDict[tuple, CommitRecord]" = OrderedDict()
-        # Reads arrive on several threads; the dict is only ever touched here.
+        # (path, head, file signature) -> (record, chain validated). A head
+        # served by the fast path is validated when history is next replayed.
+        self._current_cache: "OrderedDict[tuple, tuple[CommitRecord, bool]]" = OrderedDict()
+        # Reads arrive on several threads; both caches are only touched here.
         self._cache_lock = threading.Lock()
+        self._warm_lock = threading.Lock()
+        self._warming = {}       # (path, head) -> Event for an in-flight validation
+        self._warmed = OrderedDict()  # (path, head) -> True once attempted
         with local.transaction():
             self._recover()
 
@@ -191,9 +201,7 @@ class CreationProjects:
         """Fault-injection boundary. Never participates in production decisions."""
 
     @staticmethod
-    def _manifest(path):
-        directory(path)
-        raw = read_json(child(path, 'project.json'))
+    def _parse_manifest(raw):
         if not isinstance(raw, dict) or raw.get('format') != 'opendirector-project' or raw.get('formatVersion') != 2:
             raise ProjectError('不支持该工程格式；请创建新工程，旧文件不会自动转换。', 409, code='unsupported_format')
         try:
@@ -203,9 +211,14 @@ class CreationProjects:
         except (ValueError, TypeError):
             raise ProjectError('工程清单无效，原文件已保留。', 409, code='storage_unavailable') from None
 
+    @classmethod
+    def _manifest(cls, path):
+        directory(path)
+        return cls._parse_manifest(read_json(child(path, 'project.json')))
+
     def _scan(self):
         self.local._check_root()
-        grouped, unsupported, warnings = {}, set(), list(self._warnings)
+        grouped, manifests, unsupported, warnings = {}, {}, set(), list(self._warnings)
         self._invalid = []
         if self.root.is_dir():
             for path in sorted(self.root.iterdir()):
@@ -221,6 +234,9 @@ class CreationProjects:
                     grouped.setdefault(project_id, []).append(path)
                     if raw.get('format') != 'opendirector-project' or raw.get('formatVersion') != 2:
                         unsupported.add(project_id)
+                    else:
+                        # Parsed once per scan; callers never reread project.json.
+                        manifests[project_id] = raw
                 except (OSError, ValueError, TypeError, KeyError, ProjectError):
                     warning = f'工程“{path.name}”的清单无法读取，原文件已保留。'
                     warnings.append(warning)
@@ -228,13 +244,13 @@ class CreationProjects:
         conflicts = {key for key, paths in grouped.items() if len(paths) > 1}
         for key in sorted(conflicts):
             warnings.append(f'工程标识重复：{key}；请移走重复目录后重试。')
-        return grouped, unsupported, conflicts, warnings
+        return grouped, manifests, unsupported, conflicts, warnings
 
     def _find(self, db, project_id):
         project_id = identifier(str(project_id))
         if project_id in self._blocked:
             raise ProjectError('工程提交需要恢复；请检查磁盘及工程文件后重试。', 409, code='storage_unavailable')
-        grouped, unsupported, conflicts, _ = self._scan()
+        grouped, manifests, unsupported, conflicts, _ = self._scan()
         if project_id in conflicts:
             raise ProjectError('projects 中存在同标识工程，请移走重复目录后重试。', 409)
         if project_id in unsupported:
@@ -242,13 +258,20 @@ class CreationProjects:
         if project_id not in grouped:
             raise ProjectError('工程不在 projects 中或清单无法读取，请刷新工程列表。', 404)
         path = grouped[project_id][0]
-        return path, self._manifest(path)
+        raw = manifests.get(project_id)
+        if raw is None:
+            # The manifest is present but invalid; report the precise reason.
+            return path, self._manifest(path)
+        return path, self._parse_manifest(raw)
 
     def _record(self, path, head):
         file = child(directory(child(path, 'commits')), f'{head}.json')
         try:
             before = _file_signature(file)
-            cached = self._records_cache.get(file)
+            with self._cache_lock:
+                cached = self._records_cache.get(file)
+                if cached is not None:
+                    self._records_cache.move_to_end(file)
             # On platforms with reliable change times, a rewrite changes the
             # signature (ctime/mtime/size/inode). Re-reading and re-hashing every
             # historical commit on each read cost ~13 s per history query for a
@@ -256,9 +279,17 @@ class CreationProjects:
             # 15 s contention budget of unrelated saves. On Windows, verify bytes
             # because the file signature can remain unchanged after a rewrite.
             if cached and cached[0] == before and not self._verify_record_bytes:
-                self._records_cache.move_to_end(file)
                 # Private repository records are read-only. Public query
                 # boundaries copy returned values, not every historical snapshot.
+                return cached[1]
+            if cached and cached[0] == before and cached[2] is not None:
+                # Windows: ctime is creation time and mtime can be restored by
+                # an outside writer, so the recorded bytes are verified too.
+                content = sha256(file.read_bytes()).digest()
+                if _file_signature(file) != before:
+                    raise ValueError('Commit changed during read')
+                if content != cached[2]:
+                    raise ValueError('Commit content changed')
                 return cached[1]
             raw = file.read_bytes() if self._verify_record_bytes else None
             content = sha256(raw).digest() if raw is not None else None
@@ -268,16 +299,20 @@ class CreationProjects:
                 self._records_cache.move_to_end(file)
                 return cached[1]
             if cached:
-                self._records_cache_bytes -= self._records_cache.pop(file)[0][2]
+                with self._cache_lock:
+                    removed = self._records_cache.pop(file, None)
+                    if removed is not None:
+                        self._records_cache_bytes -= removed[0][2]
             record = CommitRecord.model_validate_json(raw) if raw is not None else CommitRecord.model_validate(read_json(file))
             if _file_signature(file) != before:
                 raise ValueError('Commit changed during read')
             if before[2] <= 8 * 1024 * 1024:
-                self._records_cache[file] = (before, record, content)
-                self._records_cache_bytes += before[2]
-                while len(self._records_cache) > RECORD_CACHE_ENTRIES or self._records_cache_bytes > RECORD_CACHE_BYTES:
-                    _, removed = self._records_cache.popitem(last=False)
-                    self._records_cache_bytes -= removed[0][2]
+                with self._cache_lock:
+                    self._records_cache[file] = (before, record, content)
+                    self._records_cache_bytes += before[2]
+                    while len(self._records_cache) > RECORD_CACHE_ENTRIES or self._records_cache_bytes > RECORD_CACHE_BYTES:
+                        _, removed = self._records_cache.popitem(last=False)
+                        self._records_cache_bytes -= removed[0][2]
             return record
         except (ValueError, TypeError, KeyError, FileNotFoundError):
             raise ProjectError('工程提交记录缺失或损坏，已阻止自动覆盖。', 409, code='storage_unavailable') from None
@@ -300,6 +335,9 @@ class CreationProjects:
         if (not records or records[-1].command.type != 'project.create' or records[-1].snapshot.eventCursor != 1
                 or records[0].snapshot.project.name != manifest.name):
             raise ProjectError('工程提交历史与清单不一致，原文件已保留。', 409, code='storage_unavailable')
+        # The chain behind this head is now proven; a head served earlier by
+        # the head-only fast path may be reused by caught-up change polling.
+        self._mark_validated(path, records[0].command.commandId)
         return records
 
     def _load(self, db, project_id):
@@ -313,18 +351,74 @@ class CreationProjects:
             return
         key = (str(path), str(record.command.commandId), signature)
         with self._cache_lock:
-            self._current_cache[key] = record
+            self._current_cache[key] = (record, True)
             self._current_cache.move_to_end(key)
             while len(self._current_cache) > CURRENT_CACHE_ENTRIES:
                 self._current_cache.popitem(last=False)
 
-    def _current(self, db, project_id, path, manifest):
-        """The head commit, reused while its file is untouched.
+    def _mark_validated(self, path, head):
+        """A full replay proved this head; caught-up polling may now trust it."""
+        prefix = (str(path), str(head))
+        with self._cache_lock:
+            for key, value in list(self._current_cache.items()):
+                if key[0] == prefix[0] and key[1] == prefix[1] and not value[1]:
+                    self._current_cache[key] = (value[0], True)
 
-        Replaying and re-validating the whole chain for every read made opening
-        a canvas take about a second. A commit leaves the old files alone and
-        moves the head, and an outside rewrite changes the head file's
-        signature, so both are noticed without trusting a bare timestamp.
+    def _schedule_warm(self, path, manifest):
+        """Validate the ancestry behind a head that was served without replay.
+
+        The first autosave after a cold open replays the chain; warming it in
+        the background right after the open read keeps that save cheap. The
+        work is coalesced per open project and bounded, never holds the catalog
+        lock and never changes a read result: a failed warm just leaves the
+        lazy path.
+        """
+        key, head = str(manifest.id), str(manifest.head)
+        with self._warm_lock:
+            if key in self._warming or (key, head) in self._warmed or len(self._warming) >= WARM_CONCURRENCY:
+                return
+            event = threading.Event()
+            self._warming[key] = (head, event)
+        threading.Thread(target=self._warm, args=(path, manifest, key, head, event),
+                         name='creation-history-warm', daemon=True).start()
+
+    def _await_warm(self, project_id, timeout=30):
+        """Join the coalesced validation instead of replaying the chain twice.
+
+        Called before a write takes the catalog lock, so a first autosave that
+        races the background warm waits for that one validation (~the cost of
+        the old cold replay) rather than both parsing every snapshot at once.
+        """
+        with self._warm_lock:
+            entry = self._warming.get(str(project_id))
+        if entry is not None:
+            entry[1].wait(timeout)
+
+    def _warm(self, path, manifest, key, head, event):
+        try:
+            self._history(path, manifest)
+        except BaseException:
+            # Reads stay correct: every path that needs the chain replays it
+            # itself and reports the integrity failure there.
+            pass
+        finally:
+            with self._warm_lock:
+                self._warming.pop(key, None)
+                self._warmed[(key, head)] = True
+                self._warmed.move_to_end((key, head))
+                while len(self._warmed) > WARM_ATTEMPTS:
+                    self._warmed.popitem(last=False)
+            event.set()
+
+    def _current_record(self, db, project_id, path, manifest):
+        """The head commit and whether its ancestry has been replayed.
+
+        Opening a canvas must not parse every historical snapshot: a commit
+        leaves the old files alone (a commit file is immutable) and rewrites the
+        manifest, so the head file signature plus the manifest decides whether
+        the cached head is still current. Missing, corrupt or rewritten heads
+        still fail here; ancestors are proven by commit/history/receipt/changes
+        reads and by the background warm an open read schedules.
         """
         signature = _head_signature(path, manifest.head, self._verify_record_bytes)
         key = (str(path), str(manifest.head), signature)
@@ -334,14 +428,35 @@ class CreationProjects:
                 if cached is not None:
                     self._current_cache.move_to_end(key)
                     return cached
-        record = self._load(db, project_id)[2][0]
+        record = self._record(path, manifest.head)
+        if (record.command.commandId != manifest.head or record.snapshot.project.id != manifest.id
+                or record.snapshot.project.name != manifest.name):
+            raise ProjectError('工程提交身份不一致，原文件已保留。', 409, code='storage_unavailable')
+        if record.previousHead is None:
+            # A single-commit project's whole history is this record; validate
+            # the creation invariants that a full replay would check.
+            if record.command.type != 'project.create' or record.snapshot.eventCursor != 1:
+                raise ProjectError('工程提交历史与清单不一致，原文件已保留。', 409, code='storage_unavailable')
+            validated = True
+        else:
+            validated = False
         if signature is not None:
             with self._cache_lock:
-                self._current_cache[key] = record
+                self._current_cache[key] = (record, validated)
                 self._current_cache.move_to_end(key)
                 while len(self._current_cache) > CURRENT_CACHE_ENTRIES:
                     self._current_cache.popitem(last=False)
-        return record
+        return record, validated
+
+    def _current(self, db, project_id, path, manifest):
+        """The head commit, reused while its file is untouched.
+
+        Replaying and re-validating the whole chain for every read made opening
+        a canvas take about a second. A commit leaves the old files alone and
+        moves the head, and an outside rewrite changes the head file's
+        signature, so both are noticed without trusting a bare timestamp.
+        """
+        return self._current_record(db, project_id, path, manifest)[0]
 
     def _lease(self, db, project_id, path, session):
         if session is None:
@@ -369,7 +484,9 @@ class CreationProjects:
         return dict(id=project_id, name=path.name, path=str(path), reason=reason)
 
     def _catalog(self, db):
-        grouped, unsupported, conflicts, warnings = self._scan()
+        # One directory scan for the whole listing: resolving each project with
+        # _find() reread every project.json once per project (O(N^2)).
+        grouped, manifests, unsupported, conflicts, warnings = self._scan()
         invalid = list(self._invalid)
         projects = []
         unreadable = [self._unreadable_item(path, reason) for path, reason in invalid]
@@ -385,7 +502,12 @@ class CreationProjects:
                 unreadable.extend(self._unreadable_item(path, reason, project_id) for path in paths)
                 continue
             try:
-                path, manifest = self._find(db, project_id)
+                if project_id in self._blocked:
+                    raise ProjectError('工程提交需要恢复；请检查磁盘及工程文件后重试。',
+                                       409, code='storage_unavailable')
+                path = paths[0]
+                raw = manifests.get(project_id)
+                manifest = self._manifest(path) if raw is None else self._parse_manifest(raw)
                 # Parsing the head alone proves the project still opens, and the
                 # manifest already carries the name it must agree with; a full
                 # chain replay just to list a name cost about a second.
@@ -542,7 +664,12 @@ class CreationProjects:
             self._recover()
             path, manifest = self._find(db, project_id)
             self.local._open(db, dict(id=str(project_id), path=str(path)), session)
-            return self._current(db, project_id, path, manifest).snapshot.model_copy(deep=True)
+            record, validated = self._current_record(db, project_id, path, manifest)
+            if not validated:
+                # The canvas is open now; prove the ancestry in the background
+                # so the first autosave does not replay it under the lock.
+                self._schedule_warm(path, manifest)
+            return record.snapshot.model_copy(deep=True)
 
     def heartbeat(self, session, project_id):
         self.open(project_id, session)
@@ -565,13 +692,18 @@ class CreationProjects:
             # A subscriber that is already caught up is the common polling
             # path. Replaying the commit chain here held the catalog lock for
             # about a second per poll on Windows and starved saves/heartbeats.
-            head = self._current(db, project_id, path, manifest)
+            head, validated = self._current_record(db, project_id, path, manifest)
             cursor = head.snapshot.eventCursor
             if after > cursor:
                 raise ProjectError('变更游标超出当前工程，请重新读取快照。', 409)
             if after == cursor:
+                if not validated:
+                    # A head served by the fast path has not proven its ancestry
+                    # yet; the outbox is derived from the chain, so validate it
+                    # before claiming there are no events.
+                    self._history(path, manifest)
                 return dict(events=[], nextCursor=after, currentCursor=cursor, hasMore=False)
-            records = self._load(db, project_id)[2]
+            records = self._history(path, manifest)
             events = [record.event for record in reversed(records) if record.event and record.event.cursor > after][:limit]
             events = [event.model_copy(deep=True) for event in events]
             return dict(events=events, nextCursor=events[-1].cursor if events else after,
@@ -592,6 +724,7 @@ class CreationProjects:
 
     def replay(self, command):
         """Resolve an already committed command before reading upload handles."""
+        self._await_warm(command.projectId)
         with self.local.transaction() as db:
             self._recover()
             return self._replay(self._load(db, command.projectId)[2], command)
@@ -600,7 +733,7 @@ class CreationProjects:
         name = project_name(command.payload.name)
         with self.local.transaction() as db:
             self._recover()
-            grouped, _, _, _ = self._scan()
+            grouped, _, _, _, _ = self._scan()
             if str(command.projectId) in self._blocked:
                 self._find(db, command.projectId)
             if str(command.projectId) in grouped:
@@ -625,16 +758,49 @@ class CreationProjects:
         return 'recycle_bin' if recycle.recyclable(self.root) else 'permanent'
 
     def _trash(self, command, source):
-        """Commit the removal, then delete the directory.
+        """Remove the project directory without rewriting its history.
+
+        Deleting a canvas used to publish a throwaway no-op commit first, which
+        replayed the whole chain (twice in the client flow) and then wrote into
+        the directory it was about to remove. The receipt is still a committed
+        noop, but the removal is validated against the head and the chain is
+        never replayed. A rejected command (stale revision) publishes its
+        receipt because that directory is kept.
 
         The directory is recycled when the platform supports it and removed
         permanently otherwise; `delete_mode` tells the client which one the user
         is agreeing to.
         """
-        receipt = self.commit(command, lambda snapshot: snapshot, session=None, source=source)
+        if source not in {'ui', 'agent', 'background', 'external'}:
+            raise ProjectError('无效的命令来源。')
         with self.local.transaction() as db:
             self._recover()
-            path, _ = self._find(db, command.projectId)
+            path, manifest = self._find(db, command.projectId)
+            commits = directory(child(path, 'commits'))
+            # Command IDs are unique per project; an existing commit file is the
+            # idempotent replay, so this needs no chain replay.
+            existing = child(commits, f'{command.commandId}.json')
+            if existing.exists():
+                replay = self._replay((self._record(path, command.commandId),), command)
+                if replay:
+                    return replay
+                raise ProjectError('该 commandId 已用于不同输入，请使用新的命令标识。', 409, code='command_conflict')
+            record, _ = self._current_record(db, command.projectId, path, manifest)
+            before = record.snapshot
+            self._closed(db, command.projectId, before, '删除')
+            issue = None
+            try:
+                validate_command(command, before)
+            except ContractError as error:
+                issue = error.issue
+            except (ValueError, ProjectError) as error:
+                issue = dict(code='invalid_input', message=str(error)[:500])
+            if issue is not None:
+                rejected = self._make_record(command, manifest.head, before, [], source, issue)
+                return self._publish(CommitIntent(
+                    fromName=path.name, toName=path.name, beforeFingerprint=digest(before), record=rejected),
+                    validated_history=True)
+            receipt = self._make_record(command, manifest.head, before, [], source).receipt
             db.execute('DELETE FROM sessions WHERE project_id=?', (str(command.projectId),))
         try:
             recycle.remove(path, recoverable=self.delete_mode == 'recycle_bin')
@@ -648,6 +814,7 @@ class CreationProjects:
                session=None, source='ui', files=(), deletes=(), with_history=False):
         if source not in {'ui', 'agent', 'background', 'external'}:
             raise ProjectError('无效的命令来源。')
+        self._await_warm(command.projectId)
         with self.local.transaction() as db:
             self._recover()
             path, manifest, records = self._load(db, command.projectId)

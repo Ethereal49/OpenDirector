@@ -683,13 +683,15 @@ class CreationCanvas:
                 return updated
         return current
 
-    def projection(self, project_id):
-        snapshot = self.projects.snapshot(project_id)
+    def _asset_checker(self, snapshot):
+        """One verified snapshot and one file check per asset in this query.
+
+        Failures are cached too; the next query retries files that were restored.
+        A projection shares one checker across reference edges and capabilities.
+        """
         availability = {}
 
         def check_asset(asset):
-            # One verified snapshot and one file check per asset in this query.
-            # Cache failures too; the next query retries files that were restored.
             if asset.id not in availability:
                 try:
                     availability[asset.id] = self.assets.reference_available(
@@ -701,11 +703,22 @@ class CreationCanvas:
                 raise value
             return value
 
-        visible = visible_item_ids(snapshot)
-        edges, capabilities = [], {}
-        models = gateway().models(self.projects.local.repository)
-        public_models = {}
-        presentation = snapshot.model_dump(mode='json')
+        return check_asset
+
+    def reference_edges(self, project_id, snapshot=None, check_asset=None):
+        """Authoritative canvas reference states for one snapshot.
+
+        The canvas renders connection evidence from these states, so the open
+        path may compute them without also resolving per-node capabilities and
+        models. `projection()` passes its shared asset checker so both passes
+        still check each asset file only once.
+        """
+        if snapshot is None:
+            snapshot = self.projects.snapshot(project_id)
+        if check_asset is None:
+            check_asset = self._asset_checker(snapshot)
+
+        edges = []
         for reference in snapshot.references:
             if not reference.active:
                 continue
@@ -718,6 +731,17 @@ class CreationCanvas:
                 state = 'unavailable'
             edges.append(dict(referenceId=reference.id, sourceItemId=reference.source.id if reference.binding == 'follow_current' else reference.sourceVersion.id if reference.sourceVersion else None,
                 targetSpecId=spec.id, state=state))
+        return edges
+
+    def projection(self, project_id, snapshot=None):
+        snapshot = self.projects.snapshot(project_id) if snapshot is None else snapshot
+        check_asset = self._asset_checker(snapshot)
+        visible = visible_item_ids(snapshot)
+        edges = self.reference_edges(project_id, snapshot, check_asset)
+        capabilities = {}
+        models = gateway().models(self.projects.local.repository)
+        public_models = {}
+        presentation = snapshot.model_dump(mode='json')
         for item in snapshot.canvasItems:
             spec, model, references, available = None, None, (), False
             owner = item.binding.objectRef if item.binding.role == 'generation' else item.binding.draftSpec if item.binding.role == 'empty' else None
