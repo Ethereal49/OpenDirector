@@ -1,5 +1,6 @@
 """CLI entry points against the real API and persistent project store."""
 import json
+import re
 from pathlib import Path
 import shlex
 import subprocess
@@ -131,7 +132,7 @@ def test_all_cli_business_commands_have_help():
         namespace, action = kind.split(".", 1)
         result = runner.invoke(cli.app, [cli.kebab(namespace), cli.kebab(action), "--help"])
         assert result.exit_code == 0, (kind, result.output)
-        assert "--file" in result.output
+        assert "--file" in re.sub(r'\x1b\[[0-9;]*m', '', result.output)
 
 
 def test_parser_error_shows_specific_command_help():
@@ -141,7 +142,7 @@ def test_parser_error_shows_specific_command_help():
     assert result.returncode == 2
     assert "No such option: --asset" in result.stderr
     for option in ("--model", "--prompt", "--duration", "--first-frame", "--reference-item"):
-        assert option in result.stderr
+        assert option in re.sub(r'\x1b\[[0-9;]*m', '', result.stderr)
 
 
 
