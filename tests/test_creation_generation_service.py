@@ -101,7 +101,9 @@ async def test_hidden_source_generation_frozen_history_restart_and_idempotent_co
     assert snapshot.jobs[0].status == 'succeeded', snapshot.jobs[0]
     assert snapshot.jobs[0].adopted
     assert len(snapshot.results) == 1
-    assert snapshot.jobs[0].inputSnapshot.references[0].asset.assetId == asset.id
+    # Hidden canvas sources remain in the project but are excluded from new inputs.
+    assert not snapshot.jobs[0].inputSnapshot.references
+    assert resolved_inputs(snapshot, spec.id)[0].asset.assetId == asset.id
     assert not any(i.visible for i in snapshot.canvasItems)
     assert (await runner.execute(command, session=session)) == receipt
     assert len(provider.calls) == 1

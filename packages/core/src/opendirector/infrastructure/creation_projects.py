@@ -277,6 +277,10 @@ class CreationProjects:
             # project with hundreds of commits, holding the catalog lock past the
             # 15 s contention budget of unrelated saves.
             if cached and cached[0] == before:
+                if self._verify_record_bytes:
+                    raw = file.read_bytes()
+                    if _file_signature(file) != before or sha256(raw).digest() != cached[2]:
+                        raise ValueError('Commit changed after caching')
                 self._records_cache.move_to_end(file)
                 # Private repository records are read-only. Public query
                 # boundaries copy returned values, not every historical snapshot.
