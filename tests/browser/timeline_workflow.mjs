@@ -308,7 +308,11 @@ try {
     args: ["--no-sandbox"],
   });
   const page = await browser.newPage({
+    locale: "zh-CN",
     viewport: { width: 1700, height: 1100 },
+  });
+  await page.addInitScript(() => {
+    try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
   });
   page.setDefaultTimeout(20000);
   const errors = [];

@@ -7,7 +7,10 @@ import { launchBrowser } from "./engine.mjs";
 const web = process.env.CREATION_WEB_URL ?? "http://127.0.0.1:5179";
 
 const browser = await launchBrowser();
-const page = await browser.newPage();
+const page = await browser.newPage({ locale: "zh-CN" });
+await page.addInitScript(() => {
+  try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
+});
 page.setDefaultTimeout(180000);
 try {
   await page.goto(web, { waitUntil: "domcontentloaded" });

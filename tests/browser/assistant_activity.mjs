@@ -4,7 +4,10 @@ import { launchBrowser } from "./engine.mjs";
 
 const base = process.env.CREATION_WEB_URL ?? "http://127.0.0.1:5179";
 const browser = await launchBrowser();
-const page = await browser.newPage({ viewport: { width: 900, height: 900 } });
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 900, height: 900 } });
+await page.addInitScript(() => {
+  try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
+});
 page.setDefaultTimeout(10000);
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));

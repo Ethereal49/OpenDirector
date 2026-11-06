@@ -17,7 +17,10 @@ async function call(path, body) {
 }
 assert.equal((await call("/api/creation-test-health")).isolated, true);
 const browser = await launchBrowser();
-const page = await browser.newPage({ viewport: { width: 1500, height: 1000 } });
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1500, height: 1000 } });
+await page.addInitScript(() => {
+  try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
+});
 page.setDefaultTimeout(15000);
 const calls = [];
 page.on("request", (request) => calls.push(request.url()));
