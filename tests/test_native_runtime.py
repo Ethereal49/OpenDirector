@@ -211,6 +211,8 @@ def test_codex_reconnect_does_not_end_turn():
 @pytest.mark.parametrize("runtime", ["default"])
 @pytest.mark.parametrize("resume", [False, True])
 def test_real_opencode_native_skill_and_gateway_write(tmp_path, runtime, resume):
+    if os.environ.get('OPENDIRECTOR_REAL_CLI') != '1':
+        pytest.skip('Real harness runs are opt-in: set OPENDIRECTOR_REAL_CLI=1')
     if native.executable('default') is None:
         pytest.skip('Bundled OpenCode is not installed')
     requests = []
