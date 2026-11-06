@@ -10,14 +10,24 @@ on:
 permissions:
   contents: read
 
+# Superseded runs are cancelled, so a stale branch does not hold a runner for
+# half an hour while the newest commit waits.
+concurrency:
+  group: release-checks-${{ github.ref }}-${{ github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name != 'ready' && github.run_id || 'active' }}
+  cancel-in-progress: true
+
+# The checks used to share one 30-minute job, so a single hung suite consumed the
+# whole budget and cancelled everything behind it. Each area now runs in its own
+# job with its own step budgets: a slow area fails visibly instead of hiding the
+# contract, build, wheel and browser results.
 jobs:
-  checks:
+  tests:
     if: >-
       github.event_name != 'pull_request' ||
       (contains(github.event.pull_request.labels.*.name, 'ready') &&
        (github.event.action != 'labeled' || github.event.label.name == 'ready'))
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     env:
       CREATION_WEB_URL: http://127.0.0.1:5179
       CREATION_API_URL: http://127.0.0.1:8019
@@ -55,21 +65,88 @@ jobs:
       - name: Check generated contracts
         run: python scripts/generate_contracts.py --check
       - name: Python tests
+        timeout-minutes: 12
         run: python -m pytest tests -q -ra
+
+  build:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'ready') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'ready'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install locked dependencies
+        run: |
+          git rev-parse HEAD
+          node --version
+          npm --version
+          python --version
+          python -m pip install -v -r requirements.txt
+          npm exec --no -- opencode --version
+          python -m pip check
       - name: Production build
         run: npm run build
       - name: Verify installed wheel without Node.js
+        timeout-minutes: 8
         run: |
           python -m pip wheel . --no-deps -w "$RUNNER_TEMP/opendirector-wheels"
           python -m venv "$RUNNER_TEMP/opendirector-wheel-venv"
           "$RUNNER_TEMP/opendirector-wheel-venv/bin/python" -m pip install "$RUNNER_TEMP"/opendirector-wheels/opendirector-*.whl
           "$RUNNER_TEMP/opendirector-wheel-venv/bin/python" -m pip check
           python scripts/verify_install.py --python "$RUNNER_TEMP/opendirector-wheel-venv/bin/python"
+
+  browser:
+    if: >-
+      github.event_name != 'pull_request' ||
+      (contains(github.event.pull_request.labels.*.name, 'ready') &&
+       (github.event.action != 'labeled' || github.event.label.name == 'ready'))
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      CREATION_WEB_URL: http://127.0.0.1:5179
+      CREATION_API_URL: http://127.0.0.1:8019
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - name: Install media tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg
+          ffmpeg -version
+          ffprobe -version
+          ffmpeg -hide_banner -encoders 2>&1 | grep 'libx264 '
+      - name: Install locked dependencies
+        run: |
+          git rev-parse HEAD
+          node --version
+          python --version
+          python -m pip install -v -r requirements.txt
+          python -m pip check
       - name: Install isolated browser dependencies
         run: |
           npm install --prefix "$RUNNER_TEMP/opendirector-browser" --no-save --no-package-lock playwright-core@1.58.2
           node "$RUNNER_TEMP/opendirector-browser/node_modules/playwright-core/cli.js" install --with-deps --only-shell chromium
       - name: Isolated browser workflows
+        timeout-minutes: 18
         run: |
           export PLAYWRIGHT_MODULE="$RUNNER_TEMP/opendirector-browser/node_modules/playwright-core/index.mjs"
           python tests/browser/creation_server.py --port 8019 >"$RUNNER_TEMP/creation-server.log" 2>&1 &
