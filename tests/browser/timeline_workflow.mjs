@@ -607,6 +607,11 @@ try {
 } catch (error) {
   await writeFile(join(evidence, "services.log"), logs);
   console.error("Evidence:", evidence);
+  if (browser) {
+    const page = browser.contexts()[0]?.pages()[0];
+    if (page) console.error("Browser state:", page.url(), await page.locator("body").innerText().catch(() => "unavailable"));
+  }
+  console.error("Service logs:", logs.slice(-24000));
   throw error;
 } finally {
   await browser?.close();
