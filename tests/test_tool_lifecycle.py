@@ -89,6 +89,7 @@ def test_queued_cancellation_is_durable_idempotent_and_never_submits(tool_projec
     _, _, _, pid, session, _, value, factory = tool_project
     async def run():
         service = factory()
+        service.limit = asyncio.Semaphore(1)
         await service.limit.acquire()
         try:
             await service.submit(pid, value, session)
