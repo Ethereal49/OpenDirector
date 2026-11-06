@@ -47,6 +47,8 @@ jobs:
         run: npm test
       - name: Check bilingual catalogs
         run: npm run check:i18n
+      - name: Check layer imports
+        run: lint-imports
       - name: Python tests
         run: python -m pytest tests -q -ra
       - name: Check generated contracts

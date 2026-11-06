@@ -18,9 +18,11 @@ from opendirector.domain.creation.generation import FollowingSource, ResolvedRef
 from opendirector.domain.creation.canvas import CanvasReferenceSources, FollowingReferenceSource, PinnedReferenceSource, media_card_size, node_capabilities, VideoCanvasItem
 from opendirector.domain.creation.models import ModelConfigPublic
 from opendirector.domain.creation.project import ProjectSnapshot, asset_references
+from opendirector.domain.creation.index import object_index
 from opendirector.domain.creation.validation import ContractError
 from opendirector.domain.input_rules import input_rules
 from opendirector.domain.projects import ProjectError
+from opendirector.ports.gateway import gateway
 
 COLLECTIONS = {'canvas_item': 'canvasItems', 'generation_spec': 'generationSpecs',
                'reference': 'references', 'editor_document': 'editorDocuments',
@@ -701,8 +703,7 @@ class CreationCanvas:
 
         visible = visible_item_ids(snapshot)
         edges, capabilities = [], {}
-        from opendirector.infrastructure.model_configs import ModelConfigs
-        models = ModelConfigs(self.projects.local.repository)
+        models = gateway().models(self.projects.local.repository)
         public_models = {}
         presentation = snapshot.model_dump(mode='json')
         for reference in snapshot.references:
@@ -769,7 +770,6 @@ class CreationCanvas:
 
     def query_snapshot(self, query):
         from opendirector.application.creation_history import CreationHistory
-        from opendirector.infrastructure.creation_projects import object_index
         snapshot = self.projects.snapshot(query.projectId)
         history = CreationHistory(self.projects)
         if query.type == 'project.get':

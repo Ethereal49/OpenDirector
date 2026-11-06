@@ -19,13 +19,17 @@ from pydantic import Field, ValidationError, model_validator
 
 from opendirector.domain.creation.base import Contract, Digest, ObjectVersion, digest
 from opendirector.domain.creation.commands import Command, CommandReceipt, ProjectEvent, command_fingerprint
+from opendirector.domain.creation.index import object_index
 from opendirector.domain.creation.project import Project, ProjectSnapshot, ViewState
 from opendirector.domain.creation.validation import ContractError, validate_command
 from opendirector.domain.projects import ProjectError, identifier, project_name
+from opendirector.ports.dispatch import command_dispatcher
 from opendirector.infrastructure.local_projects import LocalProjects, child, read_json, write_json
 from opendirector.infrastructure import recycle
+from opendirector.infrastructure.directories import directory, sync_directory
 from opendirector.infrastructure.rename import rename_path
-from opendirector.infrastructure.creation_files import AssetFileDelete, AssetFileWrite, cleanup_staging, delete_files, install_files
+from opendirector.infrastructure.creation_files import cleanup_staging, delete_files, install_files
+from opendirector.ports.files import AssetFileDelete, AssetFileWrite
 
 
 class Manifest(Contract):
@@ -98,37 +102,9 @@ class CommitIntent(Contract):
         return self
 
 
-def sync_directory(path: Path):
-    # Windows does not expose directory fsync through os.open.
-    if os.name == 'nt':
-        return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def durable_json(path: Path, value):
     write_json(path, value)
     sync_directory(path.parent)
-
-
-def directory(path: Path):
-    if path.is_symlink() or path.resolve() != path:
-        raise ProjectError('工程存储目录不能是符号链接。', 409, code='storage_unavailable')
-    if path.exists() and not path.is_dir():
-        raise ProjectError('工程存储目录被文件占用。', 409, code='storage_unavailable')
-    return path
-
-
-def object_index(snapshot):
-    result = {('project', snapshot.project.id): snapshot.project}
-    for kind, collection in [('asset', snapshot.assets), ('generation_spec', snapshot.generationSpecs),
-            ('reference', snapshot.references), ('canvas_item', snapshot.canvasItems),
-            ('editor_document', snapshot.editorDocuments), ('job', snapshot.jobs), ('result', snapshot.results)]:
-        result.update({(kind, item.id): item for item in collection})
-    return result
 
 
 def object_changes(before, after, command):
@@ -185,10 +161,12 @@ def _head_signature(path, head, verify_bytes=False):
 
 
 class CreationProjects:
-    """Authoritative repository for lifecycle and shared creation commands.
+    """Authoritative repository for project commits and lifecycle storage.
 
     commit() is an internal application-service boundary;
     untrusted clients cannot supply a callback or replace an entire snapshot.
+    Command routing lives in application.creation_commands. execute() delegates
+    there so this module does not import application services.
     """
     def __init__(self, local: LocalProjects):
         self.local = local
@@ -600,31 +578,8 @@ class CreationProjects:
                         currentCursor=cursor, hasMore=bool(events and events[-1].cursor < cursor))
 
     def execute(self, command: Command, *, session=None, source='ui', imported_from=None):
-        if command.type == 'project.trash':
-            return self._trash(command, source)
-        if command.type == 'project.restore':
-            raise ProjectError('回收目录中的工程暂不支持在应用内恢复。', 501, code='capability_unsupported')
-        if command.type in {'asset.import', 'asset.writeText', 'asset.updateMetadata'}:
-            from opendirector.application.creation_assets import CreationAssets
-            return CreationAssets(self).execute(command, session=session, source=source, imported_from=imported_from)
-        if imported_from is not None:
-            raise ProjectError('只有素材导入可以声明归档来源。', 400, code='invalid_input')
-        if command.type == 'project.create':
-            return self._create(command, source)
-        if command.type in {'history.undo', 'history.redo', 'generationSpec.restore', 'canvas.applyVersion', 'asset.delete'}:
-            from opendirector.application.creation_history import CreationHistory
-            return CreationHistory(self).execute(command, session=session, source=source)
-        if command.type != 'project.rename':
-            from opendirector.application.creation_canvas import CreationCanvas
-            return CreationCanvas(self).execute(command, session=session, source=source)
-        def rename(snapshot):
-            name = project_name(command.payload.name)
-            if snapshot.project.name == name:
-                return snapshot
-            data = snapshot.model_dump()
-            data['project'] = dict(id=snapshot.project.id, name=name, revision=snapshot.project.revision + 1)
-            return ProjectSnapshot.model_validate(data)
-        return self.commit(command, rename, session=session, source=source)
+        return command_dispatcher().execute(
+            self, command, session=session, source=source, imported_from=imported_from)
 
     @staticmethod
     def _replay(records, command):
