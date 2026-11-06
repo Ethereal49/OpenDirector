@@ -18,7 +18,7 @@ async function call(path, body) {
 }
 assert.equal((await call("/api/creation-test-health")).isolated, true);
 const browser = await launchBrowser();
-const page = await browser.newPage({ viewport: { width: 1600, height: 1100 } });
+const page = await browser.newPage({ locale: "zh-CN", viewport: { width: 1600, height: 1100 } });
 // Skip the first-run model setup welcome; it covers the canvas.
 await page.addInitScript(() =>
   localStorage.setItem("opendirector.modelSetup.v1", "dismissed"),
