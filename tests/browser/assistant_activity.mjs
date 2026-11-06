@@ -28,51 +28,48 @@ try {
   const group = page.locator(".cw-chat-tool-group > details");
   const calls = tools(1000);
   await render(message(calls));
-  // Chromium can report a flex summary's bounding box as empty while its
-  // contents are painted; inspect it and dispatch disclosure clicks directly.
-  await group.getByText("Activity · 1000 calls", { exact: true }).waitFor({ state: "attached" });
+  await page.locator('.cw-chat-execution-history > summary').click();
+  await group.getByText("Activity · 1000 calls", { exact: true }).waitFor();
   await page.locator(".cw-chat-tool-group-items").waitFor({ state: "detached" });
   assert.equal(await group.getAttribute("open"), null);
   assert.equal(await page.locator('[role="status"]').innerText(), "Running: Read a web page");
-  assert.equal(await page.locator(".cw-chat-markdown").textContent(), prefix);
+  assert.equal(await page.locator(".cw-chat-markdown").innerText(), prefix);
 
-  await group.locator(":scope > summary").dispatchEvent("click");
+  await group.locator(":scope > summary").click();
   await page.waitForFunction(() => document.querySelectorAll(".cw-chat-tool-group-items > details").length === 50);
   const first = group.locator(".cw-chat-tool-group-items > details").first();
-  await first.locator(":scope > summary").dispatchEvent("click");
+  await first.locator(":scope > summary").click();
   calls.push({ ...calls.at(-1), id: "call-1000" });
   await render(message(calls));
   await page.waitForFunction(() => document.querySelectorAll(".cw-chat-tool-group-items > details").length === 51);
   assert.notEqual(await first.getAttribute("open"), null);
   assert.notEqual(await group.getAttribute("open"), null);
-  const earlier = group.locator(".cw-chat-show-earlier");
-  assert.equal(await earlier.textContent(), "Show 50 earlier calls");
-  await earlier.dispatchEvent("click");
+  await group.getByRole("button", { name: "Show 50 earlier calls", exact: true }).click();
   await page.waitForFunction(() => document.querySelectorAll(".cw-chat-tool-group-items > details").length === 101);
 
-  await group.locator(":scope > summary").dispatchEvent("click");
+  await group.locator(":scope > summary").click();
   await page.waitForFunction(() => !document.querySelector(".cw-chat-tool-group-items"));
   calls.forEach((call, index) => {
     if (call.status === "running") calls[index] = { ...call, status: "complete" };
   });
   calls[calls.length - 1] = { ...calls.at(-1), status: "failed", error: "Page unavailable" };
   await render({ ...message(calls, prefix + "Done."), status: "complete" });
-  await group.getByText("1000/1001 complete · 1 failed", { exact: true }).waitFor({ state: "attached" });
+  await group.getByText("1000/1001 complete · 1 failed", { exact: true }).waitFor();
   assert.equal(await page.getByText("Page unavailable", { exact: true }).count(), 0);
   assert.equal(await group.evaluate((element) => element.classList.contains('is-failed')), false);
-  await group.locator(":scope > summary").dispatchEvent("click");
+  await group.locator(":scope > summary").click();
   const failure = page.locator('.cw-chat-tool-group-items > details.is-failed');
-  await failure.locator(':scope > summary').dispatchEvent("click");
-  await page.getByText("Page unavailable", { exact: true }).waitFor({ state: "attached" });
-  await group.locator(":scope > summary").dispatchEvent("click");
+  await failure.locator(':scope > summary').click();
+  await page.getByText("Page unavailable", { exact: true }).waitFor();
+  await group.locator(":scope > summary").click();
   await page.locator(".cw-chat-tool-group-items").waitFor({ state: "detached" });
-  assert.equal(await page.locator(".cw-chat-markdown").last().textContent(), "Done.");
+  assert.equal(await page.locator(".cw-chat-markdown").last().innerText(), "Done.");
   assert.equal(await page.locator('[role="status"]').count(), 0);
 
   await render({ ...message([]), plan: [{ content: "Check assets", status: "in_progress" }] });
   await page.getByText("Running plan: Check assets", { exact: true }).waitFor();
-  await page.locator(".cw-chat-plan > summary").dispatchEvent("click");
-  await page.getByText("Check assets", { exact: true }).waitFor({ state: "attached" });
+  await page.locator(".cw-chat-plan > summary").click();
+  await page.getByText("Check assets", { exact: true }).waitFor();
   await render(message([]), true);
   await page.getByText("Thinking…", { exact: true }).waitFor();
   assert.deepEqual(errors, []);

@@ -192,6 +192,7 @@ try {
     await page.evaluate(async (projectId) => {
       const { creationClient } = await import("/src/backend/creationClient.ts");
       const client = creationClient(projectId);
+      await client.refresh();
       await client.selectResult(
         client.snapshot.generationSpecs[0].id,
         client.snapshot.results[0].id,

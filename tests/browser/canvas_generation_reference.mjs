@@ -13,6 +13,9 @@ async function call(path, body) {
 assert.equal((await call("/api/creation-test-health")).isolated, true);
 const browser = await launchBrowser();
 const page = await browser.newPage({ locale: "en-US", viewport: { width: 1600, height: 1000 } });
+await page.addInitScript(() => {
+  try { localStorage.setItem("opendirector.modelSetup.v1", "dismissed"); } catch {}
+});
 page.setDefaultTimeout(15000);
 try {
   for (const binding of ["follow_current", "pinned"]) {

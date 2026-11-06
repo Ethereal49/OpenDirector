@@ -342,8 +342,10 @@ try {
     pid = response.request().postDataJSON().projectId;
     url = base + `/ai-tool/ai-canvas/${pid}`;
     const projectName = page.getByRole("textbox", { name: "Project name", exact: true });
-    await projectName.fill("Full creation " + crypto.randomUUID().slice(0, 8));
+    const name = "Full creation " + crypto.randomUUID().slice(0, 8);
+    await projectName.fill(name);
     await projectName.press("Enter");
+    await page.getByRole("button", { name, exact: true }).waitFor();
     await saved();
     await page
       .getByRole("toolbar", { name: "Canvas creation tools" })
