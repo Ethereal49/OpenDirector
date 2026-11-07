@@ -57,6 +57,16 @@ class AudioParameters(Contract):
     creationType: Literal['audio', 'music'] = Field(default='audio', description='Speech or music creation mode.')
     mode: Literal['tts', 'unified'] = Field(default='tts', description='Operation mode within this contract variant.')
     voice: str | None = Field(default=None, pattern=STORED_VOICE_PATTERN, description='Provider voice identifier or name.')
+    voiceConnectionId: str | None = Field(
+        default=None, pattern=r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+        exclude_if=lambda value: value is None,
+        description='Model service connection that issued the selected voice.')
+    voiceProvider: Literal['moss', 'vllm-omni'] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+        description='Voice-library provider for the selected voice.')
+    voiceHasReference: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+        description='Whether the selected voice carries a reference transcript.')
     # Legacy: a release stored an explicit instrumental choice. It stays readable
     # so those specs and job fingerprints still load; generation ignores it.
     instrumental: bool = Field(default=False, exclude_if=lambda value: value is False, description='Legacy explicit instrumental choice retained for stored records.')
