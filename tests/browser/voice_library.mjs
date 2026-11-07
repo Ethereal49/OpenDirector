@@ -75,6 +75,15 @@ try {
   await library.click();
   const panel = page.getByRole("dialog", { name: "Voice library", exact: true });
   await panel.getByRole("button", { name: "Select narrator", exact: true }).waitFor();
+  assert.equal(await panel.locator(".cw-voice-filters").count(), 0);
+  await page.getByRole("button", { name: "Close voice library", exact: true }).click();
+  await until(async () => (await page.getByRole("dialog", { name: "Voice library", exact: true }).count()) === 0);
+  await library.click();
+  await page.getByRole("dialog", { name: "Voice library", exact: true }).getByRole("button", { name: "Select narrator", exact: true }).waitFor();
+  await page.keyboard.press("Escape");
+  await until(async () => (await page.getByRole("dialog", { name: "Voice library", exact: true }).count()) === 0);
+  await library.click();
+  await page.getByRole("dialog", { name: "Voice library", exact: true }).getByRole("button", { name: "Select narrator", exact: true }).waitFor();
   const grid = panel.locator(".cw-voice-grid");
   assert.equal(
     (await grid.evaluate((node) => getComputedStyle(node).gridTemplateColumns.split(" ").length)),
@@ -115,6 +124,7 @@ try {
   await until(async () => (await page.getByRole("button", { name: "Select created-clone", exact: true }).count()) === 0);
   await page.getByRole("button", { name: "Close voice library", exact: true }).click();
   await chooseGenerationModel(page, `config:${moss.id}`);
+  assert.equal(await page.getByRole("textbox", { name: "Voice ID (required)", exact: true }).inputValue(), "");
   await page.getByRole("button", { name: "Voice library", exact: true }).click();
   const mossPanel = page.getByRole("dialog", { name: "Voice library", exact: true });
   await mossPanel.getByRole("button", { name: "Select MOSS Alice", exact: true }).waitFor();
