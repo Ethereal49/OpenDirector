@@ -43,9 +43,11 @@ import {
   visibleItems,
   type CreationOperation,
 } from "./creationClient.ts";
+import { sameJsonValue } from "./sameJsonValue.ts";
 
-const same = (a: unknown, b: unknown) =>
-  JSON.stringify(a) === JSON.stringify(b);
+/** Every comparison here is over a document that carries its media inline, so
+ * it reads the values instead of serializing both sides to compare strings. */
+const same = sameJsonValue;
 const presentationFields = [
   "title",
   "width",
