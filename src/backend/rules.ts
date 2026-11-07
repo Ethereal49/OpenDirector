@@ -42,6 +42,8 @@ export interface VoiceLibraryCapabilities {
   formats: string[];
   pagination: "cursor" | "none";
   preview: boolean;
+  /** Provider lists may include built-ins the selected model rejects. */
+  filterUnsupported?: boolean;
 }
 
 export interface InputRules {

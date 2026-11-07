@@ -115,6 +115,7 @@ export const generation = {
   "generation.voice.source.custom": "Account voice",
   "generation.voice.name": "Voice name",
   "generation.voice.namePlaceholder": "e.g. Warm narrator",
+  "generation.voice.nameRule": "Up to 64 letters, numbers, dots, underscores, or hyphens",
   "generation.voice.consent": "Consent recording ID",
   "generation.voice.consentPlaceholder": "ID from the consent recording",
   "generation.voice.consentHelp": "The vLLM-Omni service requires the consent recording identifier.",

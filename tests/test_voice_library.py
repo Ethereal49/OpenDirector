@@ -29,7 +29,7 @@ def test_voice_capabilities_are_connection_specific(tmp_path):
         'requiresConsent': True, 'requiresRefText': True,
         'maxBytes': 10 * 1024 * 1024, 'maxDurationSeconds': None,
         'formats': ['wav', 'mp3', 'flac', 'ogg', 'aac', 'webm', 'mp4'],
-        'pagination': 'none', 'preview': False,
+        'pagination': 'none', 'preview': False, 'filterUnsupported': False,
     }
     assert public['moss-tts-1.5-flash']['inputRules']['voiceLibrary']['provider'] == 'moss'
     assert public['moss-tts-1.5-flash']['inputRules']['voiceLibrary']['canDelete'] is False
@@ -165,3 +165,69 @@ def test_create_validation_requires_adapter_fields_and_supported_file(tmp_path):
                                    content_type='audio/wav', name='made', consent='consent-1', ref_text='words',
                                    speaker_description=''))
     assert wrong_size.value.code == 'voice_library_file_size'
+
+
+def _audio_config(tmp_path, model_id, provider_id=None):
+    configs = ModelConfigs(tmp_path)
+    config = configs.save('audio', 'http://127.0.0.1:12345/v1', model_id, '',
+                          connection_type='self_hosted', protocol='openai', auth_mode='none')
+    if provider_id:
+        config['providerId'] = provider_id
+    from opendirector.domain.creation.models import ModelConfigPublic
+    return ModelConfigPublic.model_validate(config)
+
+
+def _audio_spec(model, *, _kind='audio', **parameters):
+    from uuid import uuid4
+    from opendirector.domain.creation.generation import AudioGenerationSpec
+    return AudioGenerationSpec(kind=_kind, id=uuid4(), projectId=uuid4(), modelConfigId=model.id, prompt='Read this.',
+                               parameters={'voice': parameters.pop('voice', 'voice-one'), **parameters})
+
+
+def test_validate_generation_enforces_voice_connection_provider_and_transcript(tmp_path):
+    from opendirector.domain.creation.generation import validate_generation
+    model = _audio_config(tmp_path, 'qwen3-tts-drama-3', provider_id='11111111-1111-4111-8111-111111111111')
+    good = _audio_spec(model, voiceConnectionId='11111111-1111-4111-8111-111111111111',
+                       voiceProvider='vllm-omni', voiceHasReference=True)
+    validate_generation(good, model)
+    with pytest.raises(ValueError, match='音色'):
+        validate_generation(_audio_spec(model, voiceConnectionId='22222222-2222-4222-8222-222222222222',
+                                        voiceProvider='vllm-omni', voiceHasReference=True), model)
+    with pytest.raises(ValueError, match='音色'):
+        validate_generation(_audio_spec(model, voiceConnectionId='11111111-1111-4111-8111-111111111111',
+                                        voiceProvider='moss', voiceHasReference=True), model)
+    with pytest.raises(ValueError, match='音色'):
+        validate_generation(_audio_spec(model, voiceConnectionId='11111111-1111-4111-8111-111111111111',
+                                        voiceProvider='vllm-omni', voiceHasReference=False), model)
+    # A legacy command without voice metadata keeps validating through the
+    # shared rules; connection pinning only applies to stored voice identity.
+    legacy = _audio_spec(model, voiceConnectionId=None, voiceProvider=None, voiceHasReference=None)
+    validate_generation(legacy, model)
+
+
+def test_create_rejects_names_outside_the_selectable_voice_contract(tmp_path):
+    configs, config, _ = configs_at(tmp_path)
+    service = VoiceLibrary(configs, httpx.MockTransport(lambda request: httpx.Response(201)))
+    for bad in ('my voice', 'x' * 65, '中文'):
+        with pytest.raises(ProjectError) as rejected:
+            asyncio.run(service.create(config['id'], filename='sample.wav', data=b'RIFF',
+                                       content_type='audio/wav', name=bad, consent='consent-1',
+                                       ref_text='words', speaker_description=''))
+        assert rejected.value.code == 'voice_library_name'
+    def handle(request):
+        return httpx.Response(201, json={'voice': {'name': 'my_voice-1'}})
+    ok_service = VoiceLibrary(configs, httpx.MockTransport(handle))
+    created = asyncio.run(ok_service.create(config['id'], filename='sample.wav', data=b'RIFF',
+                               content_type='audio/wav', name='my_voice-1', consent='consent-1',
+                               ref_text='words', speaker_description=''))
+    assert created['id'] == 'my_voice-1'
+
+
+def test_moss_model_with_required_reference_audio_hides_incompatible_builtin(tmp_path):
+    """Nano-style models list `default` but reject it without ref_audio (review 4502466605)."""
+    configs = ModelConfigs(tmp_path)
+    config = configs.save('audio', 'https://api.mosi.cn/v1', 'moss-tts-nano', 'secret-key',
+                          connection_type='api', protocol='openai', auth_mode='bearer')
+    capabilities = next(item for item in configs.list() if item['id'] == config['id'])['inputRules']['voiceLibrary']
+    assert capabilities['provider'] == 'moss'
+    assert capabilities['filterUnsupported'] is True

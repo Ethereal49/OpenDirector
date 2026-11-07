@@ -147,6 +147,10 @@ export function VoiceLibraryPopover({
     setFavorites(next);
     writeVoiceFavorites(next);
   };
+  const unsupported = (voice: Voice) =>
+    Boolean(capabilities.filterUnsupported) &&
+    voice.source === "builtin" &&
+    voice.metadata?.refAudio === "required";
   const metadataKeys = Array.from(
     new Set(
       voices.flatMap((voice) =>
@@ -159,6 +163,7 @@ export function VoiceLibraryPopover({
   const visible = voices.filter((voice) => {
     if (tab === "favorites" && !favorite(voice)) return false;
     if (tab === "mine" && !voiceIsMine(voice)) return false;
+    if (unsupported(voice)) return false;
     return metadataKeys.every(
       (key) => !filters[key] || voice.metadata?.[key] === filters[key],
     );
@@ -300,10 +305,11 @@ export function VoiceLibraryPopover({
             id={nameId}
             value={name}
             required
-            maxLength={120}
+            maxLength={64}
             placeholder={t("generation.voice.namePlaceholder")}
             onChange={(event) => setName(event.target.value)}
           />
+          <small>{t("generation.voice.nameRule")}</small>
           {capabilities.requiresConsent ? (
             <>
               <label htmlFor={consentId}>{t("generation.voice.consent")}</label>

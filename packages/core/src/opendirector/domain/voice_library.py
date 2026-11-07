@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from pathlib import PurePath
+from uuid import UUID
 
 from .moss_speech import is_moss_speech
 from .projects import ProjectError
@@ -18,18 +19,22 @@ _VOICE_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$')
 _TRANSCRIPT_MODELS = ('drama-3', 'drama3', 'cosyvoice3', 'cosyvoice-3')
 
 
+def _field(config, key, default=None):
+    return config.get(key, default) if isinstance(config, dict) else getattr(config, key, default)
+
+
 def voice_provider(config) -> str | None:
     """Return the voice-library adapter that serves this model, if any."""
     if is_moss_speech(config):
         return 'moss'
-    if (config.get('kind') == 'audio' and config.get('connectionType') == 'self_hosted'
-            and config.get('protocol') == 'openai'):
+    if (_field(config, 'kind') == 'audio' and _field(config, 'connectionType') == 'self_hosted'
+            and _field(config, 'protocol') == 'openai'):
         return 'vllm-omni'
     return None
 
 
 def requires_transcript(config) -> bool:
-    name = str(config.get('modelId', '')).rsplit('/', 1)[-1].lower()
+    name = str(_field(config, 'modelId', '')).rsplit('/', 1)[-1].lower()
     return any(token in name for token in _TRANSCRIPT_MODELS)
 
 
@@ -49,7 +54,37 @@ def voice_library_capabilities(config) -> dict | None:
         'formats': list(VLLM_FORMATS if vllm else MOSS_FORMATS),
         'pagination': 'cursor' if not vllm else 'none',
         'preview': False,
+        'filterUnsupported': not vllm,
     }
+
+
+def connection_id(config) -> str | None:
+    """The connection a voice belongs to: provider group ID or the config ID."""
+    if isinstance(config, dict):
+        provider = config.get('providerId') or config['id']
+    else:
+        provider = config.providerId or config.id
+    return str(provider)
+
+
+def voice_matches(config, parameters) -> bool:
+    """Whether stored voice metadata still identifies a usable voice here.
+
+    `voiceConnectionId` pins the identity; provider and reference capability
+    guard against a re-pointed connection whose voice set changed shape.
+    """
+    library = voice_library_capabilities(config)
+    if not parameters.voice:
+        return True
+    if parameters.voiceConnectionId and parameters.voiceConnectionId != connection_id(config):
+        return False
+    if library is None:
+        return True
+    if parameters.voiceProvider and parameters.voiceProvider != library['provider']:
+        return False
+    if library['requiresRefText'] and parameters.voiceHasReference is False:
+        return False
+    return True
 
 
 def voice_id(value: str) -> str:
@@ -84,8 +119,8 @@ def voice_create_fields(config, *, name: str, consent: str | None, ref_text: str
     speaker_description = (speaker_description or '').strip()
     if provider == 'vllm-omni' and not name:
         raise ProjectError('请填写音色名称。', 422, code='voice_library_name')
-    if len(name) > 120:
-        raise ProjectError('音色名称不能超过 120 个字符。', 422, code='voice_library_name')
+    if not _VOICE_ID.fullmatch(name):
+        raise ProjectError('音色名称需为 1–64 个字母、数字、点、下划线或连字符。', 422, code='voice_library_name')
     if provider == 'vllm-omni' and not consent:
         raise ProjectError('请填写声音授权记录 ID。', 422, code='voice_library_consent')
     if len(consent) > 512 or len(ref_text) > 8000 or len(speaker_description) > 500:

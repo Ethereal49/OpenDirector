@@ -41,6 +41,7 @@ class VoiceLibraryRules(Contract):
     formats: tuple[str, ...] = Field(description='Accepted voice sample file extensions.')
     pagination: Literal['cursor', 'none'] = Field(description='Voice list pagination style.')
     preview: bool = Field(description='Whether the provider returns preview audio.')
+    filterUnsupported: bool = Field(default=False, description='Whether provider-listed voices may fail the selected model and need a compatibility probe.')
 
 
 class InputRules(Contract):

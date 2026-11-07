@@ -111,6 +111,7 @@ export const generation = {
   "generation.voice.source.custom": "账户音色",
   "generation.voice.name": "音色名称",
   "generation.voice.namePlaceholder": "例如：温暖旁白",
+  "generation.voice.nameRule": "最长 64 个字母、数字、点、下划线或连字符",
   "generation.voice.consent": "声音授权记录 ID",
   "generation.voice.consentPlaceholder": "授权录音对应的 ID",
   "generation.voice.consentHelp": "vLLM-Omni 服务要求提供声音授权记录标识。",

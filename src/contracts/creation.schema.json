@@ -13803,6 +13803,12 @@
             "description": "Whether the provider returns preview audio.",
             "title": "Preview",
             "type": "boolean"
+          },
+          "filterUnsupported": {
+            "default": false,
+            "description": "Whether provider-listed voices may fail the selected model and need a compatibility probe.",
+            "title": "Filterunsupported",
+            "type": "boolean"
           }
         },
         "required": [
@@ -28648,6 +28654,12 @@
             "description": "Whether the provider returns preview audio.",
             "title": "Preview",
             "type": "boolean"
+          },
+          "filterUnsupported": {
+            "default": false,
+            "description": "Whether provider-listed voices may fail the selected model and need a compatibility probe.",
+            "title": "Filterunsupported",
+            "type": "boolean"
           }
         },
         "required": [
@@ -28659,7 +28671,8 @@
           "maxBytes",
           "formats",
           "pagination",
-          "preview"
+          "preview",
+          "filterUnsupported"
         ],
         "title": "VoiceLibraryRules",
         "type": "object"

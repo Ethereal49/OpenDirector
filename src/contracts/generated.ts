@@ -1447,6 +1447,7 @@ export interface VoiceLibraryRulesInput extends ContractInput {
   readonly formats: ReadonlyArray<string>;
   readonly pagination: "cursor" | "none";
   readonly preview: boolean;
+  readonly filterUnsupported?: boolean;
 }
 
 export type CanvasItemInput = TextCanvasItemInput | ImageCanvasItemInput | VideoCanvasItemInput | AudioCanvasItemInput | FileCanvasItemInput | SubjectCanvasItemInput | TimelineCanvasItemInput | StackCanvasItemInput | ToolCanvasItemInput | DirectorCanvasItemInput | GroupCanvasItemInput;
@@ -2915,6 +2916,7 @@ export interface VoiceLibraryRules extends Contract {
   readonly formats: ReadonlyArray<string>;
   readonly pagination: "cursor" | "none";
   readonly preview: boolean;
+  readonly filterUnsupported: boolean;
 }
 
 export type CanvasItem = TextCanvasItem | ImageCanvasItem | VideoCanvasItem | AudioCanvasItem | FileCanvasItem | SubjectCanvasItem | TimelineCanvasItem | StackCanvasItem | ToolCanvasItem | DirectorCanvasItem | GroupCanvasItem;

@@ -340,6 +340,7 @@ def execution_spec(spec, references, rules):
 
 def validate_generation(spec: GenerationSpec, model: ModelConfigPublic, references: tuple[ResolvedReference, ...] = ()):
     """Pure shared validation; it never submits, uploads or changes a project."""
+    from opendirector.domain.voice_library import voice_matches
     if spec.modelConfigId != model.id or model.kind != ('agent' if spec.kind == 'text' else spec.kind):
         raise ValueError('所选模型与生成类型不匹配。')
     if model.inputRules.profile == 'vllm-omni-segmentation':
@@ -359,6 +360,8 @@ def validate_generation(spec: GenerationSpec, model: ModelConfigPublic, referenc
         validate_moss_speech_input(text, spec.parameters.voice)
     elif spec.kind == 'audio' and rules.voiceRequired and not spec.parameters.voice:
         raise ValueError('请填写服务音色 ID。')
+    if spec.kind == 'audio' and not voice_matches(config=model, parameters=spec.parameters):
+        raise ValueError('所选音色属于其他服务连接或不满足当前模型的参考要求，请重新选择音色。')
     if len(references) > MAX_REFERENCES:
         raise ValueError('参考素材数量超过上限。')
     unique([(ref.referenceId, ref.asset.assetId) for ref in references], 'resolved reference assets')
