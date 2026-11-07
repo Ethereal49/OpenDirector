@@ -177,42 +177,11 @@ jobs:
           done
           curl --fail -H 'X-OpenDirector-Request: 1' "$CREATION_API_URL/api/creation-test-health"
           curl --silent --fail "$CREATION_WEB_URL/" >/dev/null
-          scripts=(
-            canvas_keyboard.mjs
-            canvas_node_titles.mjs
-            canvas_notifications.mjs
-            canvas_reference_sources.mjs
-            canvas_selection_history.mjs
-            canvas_wheel.mjs
-            composer_duration.mjs
-            composer_expansion.mjs
-            control_theme.mjs
-            creation_asset_list.mjs
-            creation_history.mjs
-            creation_journey.mjs
-            default_entry.mjs
-            double_shift_chat.mjs
-            edge_selection.mjs
-            first_last_frame_connections.mjs
-            generation_feedback.mjs
-            generation_parameters.mjs
-            hidden_references.mjs
-            jiuwenswarm_picker.mjs
-            model_picker.mjs
-            moss_provider.mjs
-            moss_speech.mjs
-            multi_selection_references.mjs
-            new_image_node_outputs.mjs
-            node_connections.mjs
-            node_versions.mjs
-            paste_undo.mjs
-            project_title_enter.mjs
-            reference_parity.mjs
-            reference_picker.mjs
-            subject_library.mjs
-            subject_node_editing.mjs
-            subject_node_media.mjs
-            tool_drafts.mjs
+          # Lane membership comes from tests/browser/manifest.json; the
+          # Release checks gate step verifies the manifest matches reality.
+          scripts=()
+          while IFS= read -r line; do scripts+=("$line"); done < <(
+            node -e 'const m=require("./tests/browser/manifest.json");for(const s of m.scripts)if((s.lanes||[]).includes("extended"))console.log([s.file,...(s.args||[])].join(" "))'
           )
           failed=0
           : > extended-results.txt
@@ -239,9 +208,9 @@ jobs:
           done
           curl --fail -H 'X-OpenDirector-Request: 1' http://127.0.0.1:8020/api/creation-test-health
           curl --silent --fail http://127.0.0.1:5180/ >/dev/null
-          fixture_scripts=(
-            assistant_sessions.mjs
-            assistant_run_navigation.mjs
+          fixture_scripts=()
+          while IFS= read -r line; do fixture_scripts+=("$line"); done < <(
+            node -e 'const m=require("./tests/browser/manifest.json");for(const s of m.scripts)if((s.lanes||[]).includes("extendedFixture"))console.log([s.file,...(s.args||[])].join(" "))'
           )
           for entry in "${fixture_scripts[@]}"; do
             log="$RUNNER_TEMP/extended-logs/${entry%.mjs}.log"
@@ -324,19 +293,9 @@ jobs:
           done
           curl --fail -H 'X-OpenDirector-Request: 1' "$CREATION_API_URL/api/creation-test-health"
           curl --silent --fail "$CREATION_WEB_URL/" >/dev/null
-          scripts=(
-            "locale.mjs"
-            "timeline_workflow.mjs --full-creation"
-            "assistant_activity.mjs"
-            "assistant_sessions.mjs"
-            "assistant_run_navigation.mjs"
-            "provider_settings.mjs"
-            "cross_canvas_paste.mjs"
-            "first_last_frame_connections.mjs"
-            "paste_undo.mjs"
-            "project_list_overflow.mjs"
-            "default_entry.mjs"
-            "creation_history.mjs"
+          scripts=()
+          while IFS= read -r line; do scripts+=("$line"); done < <(
+            node -e 'const m=require("./tests/browser/manifest.json");for(const s of m.scripts)if((s.lanes||[]).includes("production"))console.log([s.file,...(s.args||[])].join(" "))'
           )
           failed=0
           : > production-results.txt

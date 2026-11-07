@@ -53,6 +53,9 @@ jobs:
       - name: Check bilingual catalogs
         if: always() && steps.install.outcome == 'success'
         run: npm run check:i18n
+      - name: Check browser manifest
+        if: always() && steps.install.outcome == 'success'
+        run: npm run check:browser-manifest
       - name: Check layer imports
         if: always() && steps.install.outcome == 'success'
         run: lint-imports
