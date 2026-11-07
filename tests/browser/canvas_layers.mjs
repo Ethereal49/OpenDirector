@@ -112,9 +112,12 @@ try {
     .getByLabel("Layer text content", { exact: true })
     .fill("Editable after reopen");
   await page.getByRole("button", { name: "Apply to canvas", exact: true }).click();
-  // A committed snapshot may be visible before the UI receives its acknowledgement.
-  // Do not reload until the editor has cleared its pending delivery and closed.
-  await page.getByRole("button", { name: "Apply to canvas", exact: true }).waitFor({state: "hidden"});
+  // The apply control renames itself while the save is in flight, so its
+  // absence is not acknowledgement. The studio stays mounted, and its pending
+  // delivery stays in session storage, until the save resolves and it closes.
+  await page
+    .getByRole("button", { name: "Close the layer studio", exact: true })
+    .waitFor({ state: "hidden" });
   snapshot = await until((value) =>
     value.editorDocuments.some(
       (doc) => doc.kind === "layers" && doc.data.layers.length === 2,
@@ -137,9 +140,11 @@ try {
   );
   await page.getByLabel("Layer text content", { exact: true }).fill("Edited again");
   await page.getByRole("button", { name: "Apply to canvas", exact: true }).click();
-  // A committed snapshot may be visible before the UI receives its acknowledgement.
-  // Do not reload until the editor has cleared its pending delivery and closed.
-  await page.getByRole("button", { name: "Apply to canvas", exact: true }).waitFor({state: "hidden"});
+  // Same as the first apply: wait until the studio closes, not until the
+  // button label changes to the in-progress text.
+  await page
+    .getByRole("button", { name: "Close the layer studio", exact: true })
+    .waitFor({ state: "hidden" });
   snapshot = await until((value) =>
     value.editorDocuments.some(
       (doc) =>
