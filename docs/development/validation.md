@@ -87,6 +87,25 @@ AI 多会话检查使用同一隔离 API，但启动 `creation_server.py` 时额
 
 Release checks 的 `Assistant auxiliary panels` 阶段自动运行此检查，使用独立的隔离 API 与前端端口；失败时输出对应服务日志。
 
+## Nightly 检查
+
+[`nightly.yml`](../../.github/workflows/nightly.yml) 在 `main` HEAD 上按 `0 18 * * *` UTC（次日凌晨 02:00 Asia/Shanghai）运行，支持 `workflow_dispatch` 手动触发。它补充而非替代 PR 门禁 [`ci.yml`](../../.github/workflows/ci.yml)：PR 检查受 30 分钟预算约束，nightly 覆盖预算放不下或只有环境变化才暴露的边界。两者共用可复用的 [`release-checks.yml`](../../.github/workflows/release-checks.yml)（Release checks 唯一实现，PR 与 nightly 不允许出现第二份漂移副本）；其中各检查步骤相互独立，一条检查失败不会掩盖其余检查的结果。
+
+| Lane | 内容 | 结论用途 |
+| --- | --- | --- |
+| Gate parity | 与 PR 门禁完全相同的 Release checks | 发布决策依据：候选 `v0.1.x` 必须在该 SHA 上 gate parity 绿色 |
+| Python flake triage | 完整 Python 套件失败后用 `--lf` 重跑失败子集一次，区分 `flaky` 与 `fail`；另按 [`scripts/nightly/flaky-watchlist.txt`](../../scripts/nightly/flaky-watchlist.txt) 把已知时序敏感用例连跑 3 次，输出波动率 | 观测与修复时序敏感用例； flakes 可见但不被静默排除 |
+| Browser extended | 运行 PR 门禁未覆盖的全部 `tests/browser/*.mjs`（按脚本逐个记录 pass/fail，单脚本失败不中断其余脚本）。需要 `--assistant-fixture` 的脚本在独立的 fixture 服务阶段运行，与 Release checks 的对应阶段一致 | 补齐 PR 门禁之外的浏览器场景；v1 为建议性结论 |
+| Browser production | 以生产构建（`vite preview` 服务 `dist`）运行核心旅程（语言切换、时间线完整创建、助手会话、粘贴撤销等），隔离 API 以 `--assistant-fixture` 启动 | 发布前实际执行将要交付的产物，而不是只做类型检查与打包 |
+| Perf & outputs | [`mp4_render_probe.mjs`](../../tests/browser/mp4_render_probe.mjs) 渲染 MP4 落盘后用 ffprobe 校验时长、流、帧数；[`reference_drag_performance.mjs`](../../tests/browser/reference_drag_performance.mjs) 采样帧延迟与长任务并产出 CPU profile | 输出校验是硬性断言；性能数据为诊断采样，无阈值，逐次发布以便横向比较 |
+
+规则：
+
+- nightly 不自动打 tag，也不调用付费模型或真实服务。Gate parity 失败时发布决策顺延，Extended 与 Perf 失败需登记跟进但不单独阻断发布。
+- `flaky-watchlist.txt` 一行一个 pytest node id，`#` 为注释；用例稳定后应删除条目，而不是长期静默重试。triage 结论写入 `flake-report` artifact 与 Actions summary。
+- 每次运行产出 `nightly-summary`（各 lane 结果 + SHA）与 `nightly-perf`（渲染探针与拖拽采样）artifact；发布看板与失败通知按 summary artifact 对接，通知通道由发布协调人约定。
+- `mp4_render_probe.mjs` 与 `reference_drag_performance.mjs` 需要导入 `/src/*.ts`，只在 dev server 上运行；`vite preview` lane 只运行不导入 `/src` 的脚本。需要 `--assistant-fixture` 的浏览器脚本不属于普通隔离服务阶段。新增浏览器脚本应声明对生产构建与 fixture 的要求，以便纳入对应 lane。
+
 ## 证据记录
 
 在 PR 或专题验收记录中写明：
