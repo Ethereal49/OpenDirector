@@ -991,7 +991,11 @@ export function NodeComposer({
             setPanel(null);
           }}
           onDeleted={(voice: Voice) => {
-            if (settings.voiceName !== voice.id) return;
+            if (
+              settings.voiceName !== voice.id ||
+              settings.voiceConnectionId !== serviceConnectionId(config)
+            )
+              return;
             updateSettings({
               voiceName: undefined,
               voiceConnectionId: undefined,
