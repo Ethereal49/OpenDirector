@@ -38,6 +38,17 @@ const scalars = [
   'quote" and \\ backslash',
   "\n\t\u0000",
   "\ud800",
+  // Strings that spell another type: a comparator that reads "1" as 1, or
+  // "null" as null, silently treats a real change as no change.
+  "1",
+  "0",
+  "-0",
+  "1.5",
+  "1e+21",
+  "true",
+  "false",
+  "null",
+  "undefined",
   undefined,
 ];
 
@@ -118,6 +129,20 @@ test("key order and omitted members read exactly like JSON.stringify", () => {
   assert.equal(sameJsonValue(0, -0), true);
   assert.equal(sameJsonValue(undefined, "undefined"), false);
   assert.equal(sameJsonValue("undefined", "undefined"), true);
+});
+
+test("no value reads the same as another type that spells it", () => {
+  // Node and layer data mix numbers, strings and nulls under the same keys, so
+  // conflating them would drop a real edit instead of persisting it.
+  assert.equal(sameJsonValue(1, "1"), false);
+  assert.equal(sameJsonValue(0, "0"), false);
+  assert.equal(sameJsonValue(1.5, "1.5"), false);
+  assert.equal(sameJsonValue(true, "true"), false);
+  assert.equal(sameJsonValue(false, "false"), false);
+  assert.equal(sameJsonValue(null, "null"), false);
+  assert.equal(sameJsonValue({ opacity: 100 }, { opacity: "100" }), false);
+  assert.equal(sameJsonValue({ text: null }, { text: "null" }), false);
+  assert.equal(sameJsonValue({ fontSize: 24 }, { fontSize: 24 }), true);
 });
 
 test("media-heavy documents compare without serializing them", () => {

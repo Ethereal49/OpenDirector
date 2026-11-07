@@ -11,15 +11,17 @@ const omitted = (value: unknown): boolean =>
   typeof value === "function" ||
   typeof value === "symbol";
 
-/** The text JSON.stringify writes for one non-omitted primitive. Strings are
- * compared directly: its escaping is injective. */
+/** The text JSON.stringify writes for one non-omitted primitive, tagged with
+ * its type: a string must never read the same as the number, boolean or null
+ * it happens to spell. Non-finite numbers keep reading as null, as they do
+ * once serialized. */
 function text(value: unknown): string {
   if (value === null) return "null";
   if (typeof value === "number")
-    return Number.isFinite(value) ? `${value}` : "null";
-  return String(value);
+    return Number.isFinite(value) ? `number:${value}` : "null";
+  if (typeof value === "boolean") return `boolean:${value}`;
+  return `string:${value}`;
 }
-
 const hasToJSON = (value: object): boolean =>
   typeof (value as { toJSON?: unknown }).toJSON === "function";
 
